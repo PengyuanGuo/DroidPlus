@@ -170,6 +170,50 @@ def main() -> None:
     # ── Episode loop ─────────────────────────────────────────────────────
     episode_idx = 0
 
+    try:
+        _episode_loop(
+            args=args,
+            session=session,
+            droid=droid,
+            teleop=teleop,
+            gripper_initialized=gripper_initialized,
+            pin_model=pin_model,
+            pin_data=pin_data,
+            ee_frame=ee_frame,
+            base_run_dir=base_run_dir,
+            stop_flag=stop_flag,
+            episode_idx=episode_idx,
+        )
+    finally:
+        # ── Cleanup (always runs, incl. on exceptions) ───────────────────
+        if gripper_initialized:
+            try:
+                droid.gripper.shutdown_async()
+            except Exception:
+                pass
+            if gripper_backend == "franka":
+                # Release the libfranka Hand connection so Desk shows the Hand again.
+                try:
+                    droid.gripper.disconnect()
+                    print("Franka Hand connection released.")
+                except Exception as e:
+                    print(f"{_YELLOW}Warning: could not release Franka Hand: {e}{_RESET}")
+
+
+def _episode_loop(
+    *,
+    args: argparse.Namespace,
+    session: TeleopSessionConfig,
+    droid: DroidPlus,
+    teleop: Any,
+    gripper_initialized: bool,
+    pin_model: Any,
+    pin_data: Any,
+    ee_frame: Any,
+    base_run_dir: str | None,
+    stop_flag: list[bool],
+    episode_idx: int,
+) -> None:
     with KeyPoller() as keys:
         while not stop_flag[0]:
             # Wait for SPACE when interactive.
@@ -256,13 +300,6 @@ def main() -> None:
                     print(f"Warning: Failed to compute EE trajectory: {e}")
 
             episode_idx += 1
-
-    # ── Cleanup ──────────────────────────────────────────────────────────
-    if gripper_initialized:
-        try:
-            droid.gripper.shutdown_async()
-        except Exception:
-            pass
 
 
 if __name__ == "__main__":

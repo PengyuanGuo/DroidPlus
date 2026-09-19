@@ -681,6 +681,30 @@ def _gripper_stop_best_effort(gripper: object) -> None:
         pass
 
 
+def _release_gripper(st: AppState) -> bool:
+    """Drop the libfranka Gripper connection so Desk regains the Hand card.
+
+    Returns True if a connection was released.
+    """
+    with st.gripper_lock:
+        g = st.gripper
+        st.gripper = None
+        st.gripper_busy = False
+        st.gripper_homed = False
+        st.gripper_target_width_m = None
+        st.gripper_last_cmd_width_m = None
+    if g is None:
+        return False
+    _gripper_stop_best_effort(g)
+    # franky.Gripper closes its TCP socket in the C++ destructor.
+    try:
+        del g
+    except Exception:
+        pass
+    LOG.info("Franka Hand connection released")
+    return True
+
+
 def _clamp_gripper_speed(speed_m_s: float) -> float:
     # libfranka / Franka Hand practical range; GELLO sends up to 1.0 which is clamped.
     return float(max(0.01, min(0.2, float(speed_m_s))))
@@ -958,25 +982,19 @@ async def _lifespan(app: FastAPI):
     st.robot = franky.Robot(robot_ip)
     st.robot.relative_dynamics_factor = franky.RelativeDynamicsFactor(0.5, 0.4, 0.1)
 
+    # Franka Hand: do NOT connect at startup. Holding a libfranka Gripper
+    # connection makes Desk show "End effector not connected" (red) for as
+    # long as the connection is open. Connect lazily on POST /connect and
+    # release on POST /disconnect (teleop does both).
     if _gripper_enabled():
-        try:
-            st.gripper = franky.Gripper(robot_ip)
-            st.gripper_max_width_m = _read_gripper_max_width_m(st.gripper)
-            LOG.info(
-                "Franka Hand connected (max_width=%.3f m)",
-                st.gripper_max_width_m,
-            )
-            st.gripper_cmd_thread = threading.Thread(
-                target=_gripper_command_loop,
-                kwargs={"st": st},
-                name="franka-gripper-cmd",
-                daemon=True,
-            )
-            st.gripper_cmd_thread.start()
-        except Exception as e:
-            st.gripper = None
-            st.gripper_last_error = f"{type(e).__name__}: {e}"
-            LOG.warning("Franka Hand unavailable: %s", st.gripper_last_error)
+        st.gripper_cmd_thread = threading.Thread(
+            target=_gripper_command_loop,
+            kwargs={"st": st},
+            name="franka-gripper-cmd",
+            daemon=True,
+        )
+        st.gripper_cmd_thread.start()
+        LOG.info("Franka Hand enabled (lazy connect via POST /connect)")
     else:
         LOG.info("Franka Hand disabled (FRANKA_GRIPPER=0)")
 
@@ -997,8 +1015,7 @@ async def _lifespan(app: FastAPI):
             st.control_thread.join(timeout=2.0)
         if st.gripper_cmd_thread is not None:
             st.gripper_cmd_thread.join(timeout=2.0)
-        if st.gripper is not None:
-            _gripper_stop_best_effort(st.gripper)
+        _release_gripper(st)
 
 
 app = FastAPI(lifespan=_lifespan)
@@ -1220,23 +1237,44 @@ def set_command_timeout(payload: CommandTimeoutIn, request: Request) -> CommandT
 
 @app.post("/connect")
 def gripper_connect(request: Request) -> dict[str, Any]:
-    """Ensure Franka Hand is connected (created at service startup)."""
+    """Open the libfranka Gripper connection (lazy).
+
+    While this connection is held, Desk shows the Hand as "not connected";
+    call POST /disconnect when done to give the card back to Desk.
+    """
     st = _get_app_state(request)
-    if st.gripper is None and _gripper_enabled():
+    if not _gripper_enabled():
+        raise HTTPException(status_code=503, detail={"error": "Franka Hand disabled (FRANKA_GRIPPER=0)"})
+    if st.gripper is None:
         robot_ip = os.getenv("FRANKY_ROBOT_IP", DEFAULT_FRANKY_ROBOT_IP)
         try:
-            st.gripper = franky.Gripper(robot_ip)
-            st.gripper_max_width_m = _read_gripper_max_width_m(st.gripper)
-            st.gripper_last_error = None
+            g = franky.Gripper(robot_ip)
+            max_w = _read_gripper_max_width_m(g)
+            with st.gripper_lock:
+                st.gripper = g
+                st.gripper_max_width_m = max_w
+                st.gripper_last_error = None
+                st.gripper_homed = False
+            LOG.info("Franka Hand connected (max_width=%.3f m)", max_w)
         except Exception as e:
-            st.gripper_last_error = f"{type(e).__name__}: {e}"
-            st.gripper = None
+            with st.gripper_lock:
+                st.gripper_last_error = f"{type(e).__name__}: {e}"
+                st.gripper = None
+            LOG.warning("Franka Hand connect failed: %s", st.gripper_last_error)
     return {
         "connected": st.gripper is not None,
         "last_connect_error": st.gripper_last_error,
         "max_width_m": st.gripper_max_width_m if st.gripper is not None else None,
         "backend": "franka_hand",
     }
+
+
+@app.post("/disconnect")
+def gripper_disconnect(request: Request) -> dict[str, Any]:
+    """Release the libfranka Gripper connection so Desk shows the Hand again."""
+    st = _get_app_state(request)
+    released = _release_gripper(st)
+    return {"ok": True, "released": released, "connected": False, "backend": "franka_hand"}
 
 
 @app.post("/activate")

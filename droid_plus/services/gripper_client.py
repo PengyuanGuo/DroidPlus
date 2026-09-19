@@ -182,6 +182,14 @@ class GripperClient:
         r.raise_for_status()
         return r.json()
 
+    def disconnect(self) -> dict[str, Any]:
+        """Release the gripper connection (Franka Hand only; no-op for Robotiq)."""
+        r = requests.post(self._url("/disconnect"), timeout=self.timeout_s)
+        if r.status_code == 404:
+            return {"ok": True, "released": False, "unsupported": True}
+        r.raise_for_status()
+        return r.json()
+
     def reset(self) -> dict[str, Any]:
         r = requests.post(self._url("/reset"), timeout=self.timeout_s)
         r.raise_for_status()
