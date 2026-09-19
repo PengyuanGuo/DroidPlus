@@ -40,12 +40,20 @@ VERBOSE = False
 # URDF fetching
 # ---------------------------------------------------------------------------
 
+# def get_urdf(service_url: str = FRANKY_SERVICE_URL) -> str:
+#     """Fetch the URDF XML string from franky_service."""
+#     response = requests.get(f"{service_url}/urdf", timeout=10)
+#     response.raise_for_status()
+#     return response.json()["urdf"]
 def get_urdf(service_url: str = FRANKY_SERVICE_URL) -> str:
-    """Fetch the URDF XML string from franky_service."""
+    """Fetch the URDF XML string from franky_service, or a local file."""
+    local = os.environ.get("FRANKA_URDF_PATH")
+    if local:
+        with open(local) as f:
+            return f.read()
     response = requests.get(f"{service_url}/urdf", timeout=10)
     response.raise_for_status()
     return response.json()["urdf"]
-
 
 @lru_cache(maxsize=1)
 def _cached_urdf(service_url: str) -> str:

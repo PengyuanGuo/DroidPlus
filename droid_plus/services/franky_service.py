@@ -21,6 +21,7 @@ Env:
   FRANKY_ROBOT_IP=<robot-ip-or-hostname>
   CONTROL_HZ=50
   COMMAND_TIMEOUT_S=0.5
+  FRANKA_GRIPPER=1                 # set 0 to disable Franka Hand init
   ALLOWED_CLIENT_IP=<client-ip>      # optional allowlist (direct-connect only)
 """
 
@@ -31,12 +32,12 @@ import os
 import threading
 import time
 from contextlib import asynccontextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Optional
 
 import numpy as np
 import uvicorn
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel, Field
 
@@ -48,6 +49,14 @@ except ImportError as exc:
         "DROID+ does not distribute or automatically install it; see README.md "
         "for the upstream license notice and installation instructions."
     ) from exc
+
+from droid_plus.services.franka_gripper import (
+    DEFAULT_FRANKA_HAND_MAX_WIDTH_M,
+    bits_to_force_n,
+    bits_to_speed_m_s,
+    bits_to_width_m,
+    width_m_to_bits,
+)
 
 LOG = logging.getLogger("franky_service")
 
@@ -588,6 +597,21 @@ class AppState:
     control_thread: threading.Thread | None
     last_control_error: str | None
     command_timeout_s: float
+    # Franka Hand (optional; shares robot IP, separate libfranka connection).
+    gripper: object | None = None
+    gripper_lock: threading.Lock = field(default_factory=threading.Lock)
+    gripper_busy: bool = False
+    gripper_homed: bool = False
+    gripper_last_error: str | None = None
+    gripper_max_width_m: float = DEFAULT_FRANKA_HAND_MAX_WIDTH_M
+    gripper_motion_thread: threading.Thread | None = None
+
+
+class GripperGoToBitsIn(BaseModel):
+    """Robotiq-compatible gripper command (used by GripperClient / teleop)."""
+    position: int = Field(0, ge=0, le=255, description="0=open, 255=closed")
+    speed: int = Field(255, ge=0, le=255)
+    force: int = Field(255, ge=0, le=255)
 
 
 # INTERNAL FUNCTIONS
@@ -597,6 +621,119 @@ def _require_robot(st: AppState):
     if st.robot is None:
         raise HTTPException(status_code=503, detail="robot not available (is franky-control installed and robot reachable?)")
     return st.robot
+
+
+def _require_gripper(st: AppState):
+    """Return Franka Hand handle or raise 503."""
+    if st.gripper is None:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "error": "Franka Hand not available",
+                "last_error": st.gripper_last_error,
+                "hint": "Ensure FRANKA_GRIPPER=1 and franky.Gripper(robot_ip) can connect",
+            },
+        )
+    return st.gripper
+
+
+def _gripper_enabled() -> bool:
+    raw = os.getenv("FRANKA_GRIPPER", "1").strip().lower()
+    return raw not in ("0", "false", "no", "off")
+
+
+def _read_gripper_max_width_m(gripper: object) -> float:
+    for attr in ("max_width", "maxWidth"):
+        try:
+            val = getattr(gripper, attr)
+            if callable(val):
+                val = val()
+            w = float(val)
+            if w > 0.0:
+                return w
+        except Exception:
+            continue
+    return DEFAULT_FRANKA_HAND_MAX_WIDTH_M
+
+
+def _read_gripper_width_m(gripper: object) -> float:
+    for attr in ("width",):
+        try:
+            val = getattr(gripper, attr)
+            if callable(val):
+                val = val()
+            return float(val)
+        except Exception:
+            continue
+    raise RuntimeError("unable to read Franka Hand width")
+
+
+def _gripper_stop_best_effort(gripper: object) -> None:
+    try:
+        gripper.stop()
+    except Exception:
+        pass
+
+
+def _start_gripper_move(st: AppState, *, action: str, width_m: float, speed_m_s: float) -> dict[str, Any]:
+    """Latest-wins async move: preempt prior motion, start background move."""
+    g = _require_gripper(st)
+
+    def _run() -> None:
+        try:
+            _gripper_stop_best_effort(g)
+            ok = g.move(float(width_m), float(speed_m_s))
+            with st.gripper_lock:
+                st.gripper_last_error = None if ok else f"{action} returned False"
+        except Exception as e:
+            with st.gripper_lock:
+                st.gripper_last_error = f"{type(e).__name__}: {e}"
+        finally:
+            with st.gripper_lock:
+                st.gripper_busy = False
+
+    with st.gripper_lock:
+        st.gripper_busy = True
+        st.gripper_last_error = None
+        t = threading.Thread(target=_run, name=f"franka-gripper-{action}", daemon=True)
+        st.gripper_motion_thread = t
+        t.start()
+
+    return {
+        "ok": True,
+        "accepted": True,
+        "position": width_m_to_bits(width_m, max_width_m=st.gripper_max_width_m),
+        "width_m": float(width_m),
+        "speed_m_s": float(speed_m_s),
+        "busy": True,
+    }
+
+
+def _blocking_gripper_move(st: AppState, *, width_m: float, speed_m_s: float) -> dict[str, Any]:
+    g = _require_gripper(st)
+    with st.gripper_lock:
+        st.gripper_busy = True
+    try:
+        _gripper_stop_best_effort(g)
+        ok = g.move(float(width_m), float(speed_m_s))
+        width = _read_gripper_width_m(g)
+        bits = width_m_to_bits(width, max_width_m=st.gripper_max_width_m)
+        with st.gripper_lock:
+            st.gripper_last_error = None if ok else "move returned False"
+        return {
+            "ok": bool(ok),
+            "accepted": False,
+            "position": bits,
+            "width_m": float(width),
+            "object_detected": None,
+        }
+    except Exception as e:
+        with st.gripper_lock:
+            st.gripper_last_error = f"{type(e).__name__}: {e}"
+        raise HTTPException(status_code=500, detail={"error": str(e)}) from e
+    finally:
+        with st.gripper_lock:
+            st.gripper_busy = False
 
 
 def _try_recover_from_errors(*, st: AppState, context: str, exc: Exception | None = None) -> None:
@@ -686,8 +823,22 @@ async def _lifespan(app: FastAPI):
     )
     app.state.franky_state = st
     st.robot = franky.Robot(robot_ip)
-    st.robot.relative_dynamics_factor = franky.RelativeDynamicsFactor(0.3, 0.2, 0.1)
+    st.robot.relative_dynamics_factor = franky.RelativeDynamicsFactor(0.4, 0.3, 0.2)
 
+    if _gripper_enabled():
+        try:
+            st.gripper = franky.Gripper(robot_ip)
+            st.gripper_max_width_m = _read_gripper_max_width_m(st.gripper)
+            LOG.info(
+                "Franka Hand connected (max_width=%.3f m)",
+                st.gripper_max_width_m,
+            )
+        except Exception as e:
+            st.gripper = None
+            st.gripper_last_error = f"{type(e).__name__}: {e}"
+            LOG.warning("Franka Hand unavailable: %s", st.gripper_last_error)
+    else:
+        LOG.info("Franka Hand disabled (FRANKA_GRIPPER=0)")
 
     # Start background control thread (single uvicorn worker).
     if st.robot is not None:
@@ -737,11 +888,20 @@ def root():
 def health(request: Request):
     """Health/status endpoint."""
     current_app_state = _get_app_state(request)
+    with current_app_state.gripper_lock:
+        gripper_connected = current_app_state.gripper is not None
+        gripper_busy = bool(current_app_state.gripper_busy)
+        gripper_homed = bool(current_app_state.gripper_homed)
+        gripper_err = current_app_state.gripper_last_error
     return {
         "robot_connected": current_app_state.robot is not None,
         "stop_latched": current_app_state.stop_latched,
         "has_target": current_app_state.latest_target is not None,
         "last_control_error": current_app_state.last_control_error,
+        "gripper_connected": gripper_connected,
+        "gripper_homed": gripper_homed,
+        "gripper_busy": gripper_busy,
+        "gripper_last_error": gripper_err,
     }
 
 
@@ -910,6 +1070,235 @@ def set_command_timeout(payload: CommandTimeoutIn, request: Request) -> CommandT
     with current_app_state.lock:
         current_app_state.command_timeout_s = float(payload.command_timeout_s)
         return CommandTimeoutOut(command_timeout_s=current_app_state.command_timeout_s)
+
+
+# ── Franka Hand (Robotiq-compatible API for GripperClient / teleop) ───────────
+
+@app.post("/connect")
+def gripper_connect(request: Request) -> dict[str, Any]:
+    """Ensure Franka Hand is connected (created at service startup)."""
+    st = _get_app_state(request)
+    if st.gripper is None and _gripper_enabled():
+        robot_ip = os.getenv("FRANKY_ROBOT_IP", DEFAULT_FRANKY_ROBOT_IP)
+        try:
+            st.gripper = franky.Gripper(robot_ip)
+            st.gripper_max_width_m = _read_gripper_max_width_m(st.gripper)
+            st.gripper_last_error = None
+        except Exception as e:
+            st.gripper_last_error = f"{type(e).__name__}: {e}"
+            st.gripper = None
+    return {
+        "connected": st.gripper is not None,
+        "last_connect_error": st.gripper_last_error,
+        "max_width_m": st.gripper_max_width_m if st.gripper is not None else None,
+        "backend": "franka_hand",
+    }
+
+
+@app.post("/activate")
+def gripper_activate(request: Request) -> dict[str, Any]:
+    """Home the Franka Hand (libfranka homing). Safe to call once at session start."""
+    st = _get_app_state(request)
+    g = _require_gripper(st)
+    with st.gripper_lock:
+        if st.gripper_busy:
+            raise HTTPException(status_code=409, detail={"error": "Gripper busy"})
+        st.gripper_busy = True
+    try:
+        # franky / libfranka: homing() fully opens and calibrates the hand.
+        if hasattr(g, "homing"):
+            ok = bool(g.homing())
+        elif hasattr(g, "open"):
+            speed = bits_to_speed_m_s(255)
+            ok = bool(g.open(speed))
+        else:
+            raise RuntimeError("gripper has neither homing() nor open()")
+        st.gripper_max_width_m = _read_gripper_max_width_m(g)
+        with st.gripper_lock:
+            st.gripper_homed = bool(ok)
+            st.gripper_last_error = None if ok else "activate/homing returned False"
+        return {
+            "ok": bool(ok),
+            "is_activated": bool(ok),
+            "homed": bool(ok),
+            "max_width_m": st.gripper_max_width_m,
+            "backend": "franka_hand",
+        }
+    except Exception as e:
+        with st.gripper_lock:
+            st.gripper_last_error = f"{type(e).__name__}: {e}"
+        raise HTTPException(status_code=500, detail={"error": str(e)}) from e
+    finally:
+        with st.gripper_lock:
+            st.gripper_busy = False
+
+
+@app.post("/reset")
+def gripper_reset(request: Request) -> dict[str, Any]:
+    """Best-effort stop; Franka Hand has no Robotiq-style reset."""
+    st = _get_app_state(request)
+    g = _require_gripper(st)
+    _gripper_stop_best_effort(g)
+    with st.gripper_lock:
+        st.gripper_busy = False
+    return {"ok": True, "backend": "franka_hand"}
+
+
+@app.post("/reset_activate")
+def gripper_reset_activate(request: Request) -> dict[str, Any]:
+    gripper_reset(request)
+    return gripper_activate(request)
+
+
+@app.post("/open")
+def gripper_open(
+    request: Request,
+    req: GripperGoToBitsIn | None = None,
+    wait: bool = Query(True),
+) -> dict[str, Any]:
+    st = _get_app_state(request)
+    if req is None:
+        req = GripperGoToBitsIn(position=0)
+    width = bits_to_width_m(0, max_width_m=st.gripper_max_width_m)
+    speed = bits_to_speed_m_s(req.speed)
+    if not wait:
+        return _start_gripper_move(st, action="open", width_m=width, speed_m_s=speed)
+    return _blocking_gripper_move(st, width_m=width, speed_m_s=speed)
+
+
+@app.post("/close")
+def gripper_close(
+    request: Request,
+    req: GripperGoToBitsIn | None = None,
+    wait: bool = Query(True),
+) -> dict[str, Any]:
+    st = _get_app_state(request)
+    if req is None:
+        req = GripperGoToBitsIn(position=255)
+    # Prefer grasp for a firm close when waiting; async path uses move-to-zero.
+    g = _require_gripper(st)
+    speed = bits_to_speed_m_s(req.speed)
+    force = bits_to_force_n(req.force)
+    if not wait:
+        return _start_gripper_move(st, action="close", width_m=0.0, speed_m_s=speed)
+    with st.gripper_lock:
+        if st.gripper_busy:
+            raise HTTPException(status_code=409, detail={"error": "Gripper busy"})
+        st.gripper_busy = True
+    try:
+        _gripper_stop_best_effort(g)
+        ok = False
+        if hasattr(g, "grasp"):
+            try:
+                ok = bool(g.grasp(0.0, speed, force, epsilon_inner=0.005, epsilon_outer=0.005))
+            except TypeError:
+                ok = bool(g.grasp(0.0, speed, force))
+        else:
+            ok = bool(g.move(0.0, speed))
+        width = _read_gripper_width_m(g)
+        return {
+            "ok": bool(ok),
+            "accepted": False,
+            "position": width_m_to_bits(width, max_width_m=st.gripper_max_width_m),
+            "width_m": float(width),
+            "object_detected": None,
+        }
+    except Exception as e:
+        with st.gripper_lock:
+            st.gripper_last_error = f"{type(e).__name__}: {e}"
+        raise HTTPException(status_code=500, detail={"error": str(e)}) from e
+    finally:
+        with st.gripper_lock:
+            st.gripper_busy = False
+
+
+@app.post("/go_to")
+def gripper_go_to(
+    request: Request,
+    req: GripperGoToBitsIn,
+    wait: bool = Query(True),
+) -> dict[str, Any]:
+    """Move to Robotiq-style position bits (0=open … 255=closed)."""
+    st = _get_app_state(request)
+    width = bits_to_width_m(req.position, max_width_m=st.gripper_max_width_m)
+    speed = bits_to_speed_m_s(req.speed)
+    if not wait:
+        return _start_gripper_move(st, action="go_to", width_m=width, speed_m_s=speed)
+    return _blocking_gripper_move(st, width_m=width, speed_m_s=speed)
+
+
+@app.get("/gripper_state")
+def gripper_state(
+    request: Request,
+    closed_threshold: int = Query(128, ge=0, le=255),
+) -> dict[str, Any]:
+    """Robotiq-compatible state for GripperClient / teleop observation."""
+    st = _get_app_state(request)
+    g = _require_gripper(st)
+    with st.gripper_lock:
+        busy = bool(st.gripper_busy)
+        homed = bool(st.gripper_homed)
+        max_w = float(st.gripper_max_width_m)
+
+    if busy:
+        return {
+            "connected": True,
+            "position_bits": None,
+            "max_position_bits": 255,
+            "position_frac": None,
+            "width_m": None,
+            "max_width_m": max_w,
+            "is_closed": None,
+            "is_open": None,
+            "is_activated": homed,
+            "is_calibrated": homed,
+            "busy": True,
+            "backend": "franka_hand",
+        }
+
+    try:
+        width = _read_gripper_width_m(g)
+    except Exception as e:
+        raise HTTPException(
+            status_code=503,
+            detail={"error": "Failed to read Franka Hand width", "exc": repr(e)},
+        ) from e
+
+    pos = width_m_to_bits(width, max_width_m=max_w)
+    is_closed = bool(pos >= int(closed_threshold))
+    return {
+        "connected": True,
+        "position_bits": pos,
+        "max_position_bits": 255,
+        "position_frac": float(pos) / 255.0,
+        "width_m": float(width),
+        "max_width_m": max_w,
+        "is_closed": is_closed,
+        "is_open": not is_closed,
+        "is_activated": homed,
+        "is_calibrated": homed,
+        "busy": False,
+        "backend": "franka_hand",
+    }
+
+
+@app.get("/position")
+def gripper_position(request: Request) -> dict[str, Any]:
+    st = gripper_state(request)
+    return {"position": st.get("position_bits"), "busy": st.get("busy"), "backend": "franka_hand"}
+
+
+@app.get("/is_activated")
+def gripper_is_activated(request: Request) -> dict[str, Any]:
+    st = _get_app_state(request)
+    _require_gripper(st)
+    with st.gripper_lock:
+        return {"is_activated": bool(st.gripper_homed), "busy": bool(st.gripper_busy)}
+
+
+@app.get("/is_calibrated")
+def gripper_is_calibrated(request: Request) -> dict[str, Any]:
+    return gripper_is_activated(request)
 
 
 def main():

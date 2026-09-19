@@ -32,7 +32,13 @@ def enforce_min_z(
       2. Otherwise revert the two "lifting" joints (j1, j3) to the last known
          safe values.
       3. If still too low, revert the full configuration to ``q_prev_safe``.
+
+    If ``model``/``data``/``ee_frame`` are unavailable (FK disabled), returns
+    ``q_franka`` unchanged with ``z=nan``.
     """
+    if model is None or data is None or not ee_frame:
+        return q_franka, float("nan")
+
     ee = compute_ee_pose(model, data, ee_frame, q_franka)
     z = ee["position"][2]
 

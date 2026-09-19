@@ -7,9 +7,10 @@ CLI teleop runner — SO-101 leader arm streams to Franka, with recording.
 Multi-episode loop: SPACE to start, ESC to stop, then post-episode prompts
 (valid/success/score/notes). Records by default; pass --no-record to disable.
 
-Usage:
+    Usage:
     python scripts/run_teleop_cli.py
-    python scripts/run_teleop_cli.py --port /dev/ttyACM1 --no-gripper
+    python scripts/run_teleop_cli.py --port /dev/ttyACM1 --gripper none
+    python scripts/run_teleop_cli.py --gripper franka
     python scripts/run_teleop_cli.py --no-record
     python scripts/run_teleop_cli.py --task "pick_banana" --notes "first attempt"
 """
@@ -22,7 +23,7 @@ import time
 from typing import Any, Callable
 
 from droid_plus.analysis.end_effector_pose import compute_and_save_ee_trajectory_single
-from droid_plus.constants import FRANKY_SERVICE_URL, RECORD_JPEG_QUALITY
+from droid_plus.constants import FRANKY_SERVICE_URL, GRIPPER_SERVICE_URL, RECORD_JPEG_QUALITY
 from droid_plus.datagen import (
     DEFAULT_MIN_EE_Z,
     TeleopSessionConfig,
@@ -67,8 +68,17 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Teleop SO-101 leader arm to Franka with recording")
     parser.add_argument("--port", default="/dev/ttyACM0", help="SO-101 leader serial port")
     parser.add_argument("--franky-service-url", default=FRANKY_SERVICE_URL,
-        help="Franky service URL (used for URDF fetch)")
-    parser.add_argument("--no-gripper", action="store_true", help="Skip gripper initialization")
+        help="Franky service URL (robot control + URDF fetch)")
+    parser.add_argument(
+        "--gripper",
+        choices=["none", "robotiq", "franka"],
+        default="robotiq",
+        help="Gripper backend: robotiq (local gripper_service), franka (Hand via franky_service), none",
+    )
+    parser.add_argument("--no-gripper", action="store_true",
+        help="Alias for --gripper none")
+    parser.add_argument("--gripper-service-url", default=GRIPPER_SERVICE_URL,
+        help="Robotiq gripper_service URL (ignored when --gripper franka)")
     parser.add_argument("--rate-hz", type=float, default=100.0, help="Control loop rate (Hz)")
     parser.add_argument("--min-z", type=float, default=DEFAULT_MIN_EE_Z,
         help=f"Minimum EE Z height (m) — table safety threshold (default: {DEFAULT_MIN_EE_Z})")
@@ -84,6 +94,12 @@ def main() -> None:
         help="Read SO-101 but do not command the robot or gripper")
     args = parser.parse_args()
 
+    gripper_backend = "none" if args.no_gripper else str(args.gripper)
+    if gripper_backend == "franka":
+        gripper_url = str(args.franky_service_url)
+    else:
+        gripper_url = str(args.gripper_service_url)
+
     record = not args.no_record
 
     session = TeleopSessionConfig(
@@ -97,10 +113,20 @@ def main() -> None:
 
     # ── Robot + cameras ──────────────────────────────────────────────────
     print("Initializing robot...")
-    droid = DroidPlus()
+    print(f"Franky service: {args.franky_service_url}")
+    print(f"Gripper backend: {gripper_backend}"
+          + (f" ({gripper_url})" if gripper_backend != "none" else ""))
+    droid = DroidPlus(
+        franky_service_url=args.franky_service_url,
+        gripper_service_url=gripper_url,
+    )
     wait_for_cameras(droid)
 
-    pin_model, pin_data, ee_frame = build_fk_model(args.franky_service_url)
+    try:
+        pin_model, pin_data, ee_frame = build_fk_model(args.franky_service_url)
+    except Exception as e:
+        print(f"WARNING: FK unavailable ({e}) — Z safety DISABLED")
+        pin_model = pin_data = ee_frame = None
 
     # Safety: stop before anything moves.
     try:
@@ -108,15 +134,17 @@ def main() -> None:
     except Exception:
         pass
 
-    # ── Gripper, then SO-101 (ordering matters for shared USB hub) ──────
+    # ── Gripper, then SO-101 (ordering matters for shared USB hub / Robotiq) ──
     gripper_initialized = False
-    if not args.no_gripper and not args.dry_run:
-        gripper_initialized = init_gripper(droid)
+    if gripper_backend != "none" and not args.dry_run:
+        gripper_initialized = init_gripper(droid, backend=gripper_backend)
     else:
-        reason = "dry-run" if args.dry_run else "--no-gripper"
+        reason = "dry-run" if args.dry_run else "--gripper none"
         print(f"Skipping gripper initialization ({reason}).")
 
-    teleop = connect_so101(args.port, settle_s=2.0 if gripper_initialized else 0.0)
+    # Robotiq shares a USB hub with SO-101; Franka Hand is Ethernet — no settle needed.
+    settle_s = 2.0 if (gripper_initialized and gripper_backend == "robotiq") else 0.0
+    teleop = connect_so101(args.port, settle_s=settle_s)
 
     # ── Run directory ────────────────────────────────────────────────────
     base_run_dir: str | None = None

@@ -11,7 +11,15 @@ from droid_plus.constants import GRIPPER_SERVICE_URL
 
 
 class GripperClient:
-    """Thin HTTP client for `gripper_service.py`."""
+    """Thin HTTP client for gripper services.
+
+    Works with either:
+      - ``gripper_service.py`` (Robotiq 2F-85 on the workstation), or
+      - ``franky_service.py`` Franka Hand endpoints on the NUC
+        (same Robotiq-style bit API: 0=open … 255=closed).
+
+    Point ``base_url`` / ``GRIPPER_SERVICE_URL`` at the chosen service.
+    """
 
     def __init__(
         self,

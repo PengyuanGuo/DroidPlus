@@ -39,14 +39,17 @@ def build_fk_model(franky_service_url: str = FRANKY_SERVICE_URL) -> tuple[Any, A
 
 # ── Gripper ──────────────────────────────────────────────────────────────────
 
-def init_gripper(droid: "DroidPlus") -> bool:
-    """Best-effort connect + activate of the Robotiq gripper.
+def init_gripper(droid: "DroidPlus", *, backend: str = "robotiq") -> bool:
+    """Best-effort connect + activate of the gripper.
+
+    ``backend`` is informational (``robotiq`` or ``franka``); the actual HTTP
+    target is whatever ``droid.gripper`` was constructed with.
 
     Returns ``True`` if initialization succeeded, else ``False`` (so the
     caller can decide whether to proceed without gripper control).
     """
     try:
-        print("Initializing gripper...")
+        print(f"Initializing gripper (backend={backend})...")
         droid.connect_gripper()
         droid.activate_gripper()
         print("Gripper initialized successfully")
