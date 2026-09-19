@@ -200,3 +200,6 @@ SO-101 values clipped to conservative ranges before mapping (see table above).
 | Gripper not responding | Check 24V adapter, check `make gripper_service`, or use `--no-gripper` |
 | Robot doesn't move | Verify FCI activated in Franka desk, franky_service running |
 | `[safety] EE z=... reverting` | Move leader arm up, or adjust `--min-z` |
+
+### 9.19 development
+change relativefrankadynamic to make the joint streaming faster to reduce the control lag, the mapping for the 3rd, 4th joint on leader arm doesn't match the robot joint very well.
