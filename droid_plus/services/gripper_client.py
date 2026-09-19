@@ -26,11 +26,14 @@ class GripperClient:
         base_url: str | None = None,
         *,
         timeout_s: float = 5.0,
+        activate_timeout_s: float = 60.0,
         async_timeout_s: float = 0.35,
         async_busy_backoff_s: float = 0.05,
     ):
         self.base_url = (base_url or GRIPPER_SERVICE_URL).rstrip("/")
         self.timeout_s = float(timeout_s)
+        # Franka Hand homing routinely exceeds 5s; keep a separate budget.
+        self.activate_timeout_s = float(activate_timeout_s)
         # Async (fire-and-forget) settings. These affect only *_async methods.
         self.async_timeout_s = float(async_timeout_s)
         self.async_busy_backoff_s = float(async_busy_backoff_s)
@@ -184,13 +187,19 @@ class GripperClient:
         r.raise_for_status()
         return r.json()
 
-    def activate(self) -> dict[str, Any]:
-        r = requests.post(self._url("/activate"), timeout=self.timeout_s)
+    def activate(self, *, wait: bool = True) -> dict[str, Any]:
+        # Homing the Franka Hand commonly takes 10–30s.
+        timeout = self.activate_timeout_s if wait else self.timeout_s
+        r = requests.post(
+            self._url("/activate"),
+            params=self._wait_param(wait),
+            timeout=timeout,
+        )
         r.raise_for_status()
         return r.json()
 
     def reset_activate(self) -> dict[str, Any]:
-        r = requests.post(self._url("/reset_activate"), timeout=self.timeout_s)
+        r = requests.post(self._url("/reset_activate"), timeout=self.activate_timeout_s)
         r.raise_for_status()
         return r.json()
 

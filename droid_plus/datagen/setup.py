@@ -50,7 +50,22 @@ def init_gripper(droid: "DroidPlus", *, backend: str = "robotiq") -> bool:
     """
     try:
         print(f"Initializing gripper (backend={backend})...")
-        droid.connect_gripper()
+        if backend == "franka":
+            # Homing often exceeds the default 5s HTTP timeout.
+            droid.gripper.timeout_s = max(float(droid.gripper.timeout_s), 15.0)
+            droid.gripper.activate_timeout_s = max(
+                float(getattr(droid.gripper, "activate_timeout_s", 60.0)),
+                60.0,
+            )
+            print("Connecting to Franka Hand via franky_service...")
+        conn = droid.connect_gripper()
+        if backend == "franka" and not conn.get("connected", True):
+            raise RuntimeError(
+                f"Franka Hand not connected on franky_service: {conn}. "
+                "Redeploy franky_service on the NUC with FRANKA_GRIPPER=1."
+            )
+        if backend == "franka":
+            print("Homing Franka Hand (often 10–30s, please wait)...")
         droid.activate_gripper()
         print("Gripper initialized successfully")
         return True

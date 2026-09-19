@@ -1096,41 +1096,72 @@ def gripper_connect(request: Request) -> dict[str, Any]:
 
 
 @app.post("/activate")
-def gripper_activate(request: Request) -> dict[str, Any]:
-    """Home the Franka Hand (libfranka homing). Safe to call once at session start."""
+def gripper_activate(
+    request: Request,
+    wait: bool = Query(True),
+    home: bool = Query(True, description="Run Franka Hand homing (slow). Set false to skip."),
+) -> dict[str, Any]:
+    """Home the Franka Hand (libfranka homing). Can take 10–30s when wait=true."""
     st = _get_app_state(request)
     g = _require_gripper(st)
     with st.gripper_lock:
         if st.gripper_busy:
             raise HTTPException(status_code=409, detail={"error": "Gripper busy"})
         st.gripper_busy = True
-    try:
-        # franky / libfranka: homing() fully opens and calibrates the hand.
-        if hasattr(g, "homing"):
-            ok = bool(g.homing())
-        elif hasattr(g, "open"):
-            speed = bits_to_speed_m_s(255)
-            ok = bool(g.open(speed))
-        else:
-            raise RuntimeError("gripper has neither homing() nor open()")
-        st.gripper_max_width_m = _read_gripper_max_width_m(g)
-        with st.gripper_lock:
-            st.gripper_homed = bool(ok)
-            st.gripper_last_error = None if ok else "activate/homing returned False"
+
+    def _do_activate() -> dict[str, Any]:
+        try:
+            ok = True
+            if home:
+                LOG.info("Franka Hand homing started (often 10–30s)...")
+                if hasattr(g, "homing"):
+                    ok = bool(g.homing())
+                elif hasattr(g, "open"):
+                    speed = bits_to_speed_m_s(255)
+                    ok = bool(g.open(speed))
+                else:
+                    raise RuntimeError("gripper has neither homing() nor open()")
+                LOG.info("Franka Hand homing finished ok=%s", ok)
+            st.gripper_max_width_m = _read_gripper_max_width_m(g)
+            with st.gripper_lock:
+                st.gripper_homed = bool(ok)
+                st.gripper_last_error = None if ok else "activate/homing returned False"
+            return {
+                "ok": bool(ok),
+                "is_activated": bool(ok),
+                "homed": bool(ok) if home else st.gripper_homed,
+                "max_width_m": st.gripper_max_width_m,
+                "backend": "franka_hand",
+            }
+        except Exception as e:
+            with st.gripper_lock:
+                st.gripper_last_error = f"{type(e).__name__}: {e}"
+            raise
+        finally:
+            with st.gripper_lock:
+                st.gripper_busy = False
+
+    if not wait:
+        def _run() -> None:
+            try:
+                _do_activate()
+            except Exception as e:
+                LOG.warning("async activate failed: %s", e)
+
+        threading.Thread(target=_run, name="franka-gripper-activate", daemon=True).start()
         return {
-            "ok": bool(ok),
-            "is_activated": bool(ok),
-            "homed": bool(ok),
-            "max_width_m": st.gripper_max_width_m,
+            "ok": True,
+            "accepted": True,
+            "is_activated": None,
+            "homed": None,
+            "busy": True,
             "backend": "franka_hand",
         }
+
+    try:
+        return _do_activate()
     except Exception as e:
-        with st.gripper_lock:
-            st.gripper_last_error = f"{type(e).__name__}: {e}"
         raise HTTPException(status_code=500, detail={"error": str(e)}) from e
-    finally:
-        with st.gripper_lock:
-            st.gripper_busy = False
 
 
 @app.post("/reset")
@@ -1147,7 +1178,7 @@ def gripper_reset(request: Request) -> dict[str, Any]:
 @app.post("/reset_activate")
 def gripper_reset_activate(request: Request) -> dict[str, Any]:
     gripper_reset(request)
-    return gripper_activate(request)
+    return gripper_activate(request, wait=True, home=True)
 
 
 @app.post("/open")
