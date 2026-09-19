@@ -16,8 +16,8 @@ from __future__ import annotations
 DEFAULT_FRANKA_HAND_MAX_WIDTH_M = 0.08
 
 # Speed mapping for Robotiq-style speed bits → m/s.
-# Franka Hand max continuous speed is typically ~0.1 m/s; keep below that.
-DEFAULT_SPEED_MIN_M_S = 0.02
+# Franka Hand max continuous speed is ~0.1 m/s (libfranka hard limit).
+DEFAULT_SPEED_MIN_M_S = 0.05
 DEFAULT_SPEED_MAX_M_S = 0.10
 
 # Force mapping for Robotiq-style force bits → Newtons (grasp only).

@@ -610,7 +610,8 @@ class AppState:
     gripper_target_width_m: float | None = None
     gripper_target_speed_m_s: float = 0.1
     gripper_last_cmd_width_m: float | None = None
-    gripper_width_eps_m: float = 0.001
+    gripper_width_eps_m: float = 0.0015  # ~2 bits at 80 mm — ignore tiny chatter
+
 
 
 class GripperGoToBitsIn(BaseModel):
@@ -706,12 +707,12 @@ def _release_gripper(st: AppState) -> bool:
 
 
 def _clamp_gripper_speed(speed_m_s: float) -> float:
-    # libfranka / Franka Hand practical range; GELLO sends up to 1.0 which is clamped.
-    return float(max(0.01, min(0.2, float(speed_m_s))))
+    # Franka Hand continuous speed limit is ~0.1 m/s (libfranka clamps higher values).
+    return float(max(0.02, min(0.1, float(speed_m_s))))
 
 
 def _set_gripper_target(st: AppState, *, width_m: float, speed_m_s: float) -> dict[str, Any]:
-    """Queue a Move target (GELLO-style). Applied by ``_gripper_command_loop``."""
+    """Queue latest width target (preemptable streaming; applied by command loop)."""
     _require_gripper(st)
     width = max(0.0, min(float(st.gripper_max_width_m), float(width_m)))
     speed = _clamp_gripper_speed(speed_m_s)
@@ -731,7 +732,7 @@ def _set_gripper_target(st: AppState, *, width_m: float, speed_m_s: float) -> di
 
 
 def _blocking_gripper_move(st: AppState, *, width_m: float, speed_m_s: float) -> dict[str, Any]:
-    """Blocking Move — no stop()/grasp(). Used when wait=true."""
+    """Blocking Move — used when wait=true (open/close one-shots)."""
     g = _require_gripper(st)
     width = max(0.0, min(float(st.gripper_max_width_m), float(width_m)))
     speed = _clamp_gripper_speed(speed_m_s)
@@ -742,6 +743,7 @@ def _blocking_gripper_move(st: AppState, *, width_m: float, speed_m_s: float) ->
         st.gripper_target_width_m = width
         st.gripper_target_speed_m_s = speed
     try:
+        _gripper_stop_best_effort(g)
         ok = bool(g.move(float(width), float(speed)))
         measured = _read_gripper_width_m(g)
         with st.gripper_lock:
@@ -764,13 +766,32 @@ def _blocking_gripper_move(st: AppState, *, width_m: float, speed_m_s: float) ->
             st.gripper_busy = False
 
 
-def _gripper_command_loop(*, st: AppState) -> None:
-    """Apply latest gripper width target at a low rate; wait for each Move to finish.
+def _start_async_move(g: object, width: float, speed: float) -> None:
+    """Start a non-blocking Move (preempt previous with stop first)."""
+    _gripper_stop_best_effort(g)
+    if hasattr(g, "move_async"):
+        g.move_async(float(width), float(speed))
+        return
+    # Fallback: blocking move in a short-lived thread (still preemptable via stop()).
+    def _run() -> None:
+        try:
+            g.move(float(width), float(speed))
+        except Exception:
+            pass
 
-    Mirrors GELLO's ``_gripper_command_transmitted`` gate: never stack Moves, never
-    preempt with stop()/grasp() during teleop streaming.
+    threading.Thread(target=_run, name="franka-gripper-move", daemon=True).start()
+
+
+def _gripper_command_loop(*, st: AppState) -> None:
+    """Stream latest gripper width with preemption — low lag for teleop.
+
+    Unlike GELLO's wait-for-completion gate (which feels laggy for continuous
+    teleop), this loop:
+      1. polls the latest target at ~50 Hz
+      2. if it differs from the last *commanded* width, stop + move_async
+      3. never waits for the Move to finish before accepting a newer target
     """
-    period_s = 0.05  # 20 Hz poll; actual move rate is much lower (blocking move)
+    period_s = 0.02  # 50 Hz
     while not st.shutdown.is_set():
         time.sleep(period_s)
         g = st.gripper
@@ -778,7 +799,7 @@ def _gripper_command_loop(*, st: AppState) -> None:
             continue
 
         with st.gripper_lock:
-            if st.gripper_busy or not st.gripper_homed:
+            if not st.gripper_homed:
                 continue
             target = st.gripper_target_width_m
             speed = st.gripper_target_speed_m_s
@@ -788,22 +809,22 @@ def _gripper_command_loop(*, st: AppState) -> None:
                 continue
             if last is not None and abs(float(target) - float(last)) < float(eps):
                 continue
-            st.gripper_busy = True
             width = float(target)
             speed = _clamp_gripper_speed(speed)
+            # Mark commanded immediately so we do not re-issue the same width.
+            st.gripper_last_cmd_width_m = width
+            st.gripper_busy = True
 
         try:
-            ok = bool(g.move(width, speed))
+            _start_async_move(g, width, speed)
             with st.gripper_lock:
-                st.gripper_last_cmd_width_m = width
-                st.gripper_last_error = None if ok else "move returned False"
+                st.gripper_last_error = None
         except Exception as e:
             with st.gripper_lock:
                 st.gripper_last_error = f"{type(e).__name__}: {e}"
-            LOG.warning("Franka Hand move failed: %s", e)
-            # Clear sticky target so we do not immediately retry a failing width forever.
-            with st.gripper_lock:
-                st.gripper_target_width_m = None
+                # Allow retry of the same target after a fault.
+                st.gripper_last_cmd_width_m = None
+            LOG.warning("Franka Hand move_async failed: %s", e)
         finally:
             with st.gripper_lock:
                 st.gripper_busy = False
