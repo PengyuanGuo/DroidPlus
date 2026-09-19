@@ -114,19 +114,27 @@ def run_teleop_episode(
             if not session.dry_run:
                 droid.set_target_joint_state(q_franka, velocities=[0.0] * 7, seq=seq)
 
-            # Gripper — continuous mapping with a bits-delta gate to avoid spam.
+            # Gripper — continuous mapping. Gate like GELLO: only send when the
+            # previous command finished (not busy) and the target changed.
             gripper_cmd_frac = last_gripper_cmd_frac
             if gripper_initialized and not session.dry_run:
                 so101_gripper_deg = extract_so101_gripper_deg(action)
                 if so101_gripper_deg is not None:
                     robotiq_pos = so101_gripper_to_robotiq(so101_gripper_deg)
                     gripper_cmd_frac = float(robotiq_pos) / 255.0
-                    if last_gripper_pos is None or abs(robotiq_pos - last_gripper_pos) > 2:
+                    if last_gripper_pos is None or abs(robotiq_pos - last_gripper_pos) > 5:
+                        busy = False
                         try:
-                            droid.gripper.go_to_async(robotiq_pos, wait=False)
-                            last_gripper_pos = robotiq_pos
+                            st_g = droid.gripper.gripper_state()
+                            busy = bool(st_g.get("busy", False))
                         except Exception:
-                            pass
+                            busy = False
+                        if not busy:
+                            try:
+                                droid.gripper.go_to_async(robotiq_pos, wait=False)
+                                last_gripper_pos = robotiq_pos
+                            except Exception:
+                                pass
                     last_gripper_cmd_frac = gripper_cmd_frac
 
             # Sub-rate recording.
