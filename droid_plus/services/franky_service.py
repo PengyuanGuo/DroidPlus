@@ -22,6 +22,10 @@ Env:
   CONTROL_HZ=50
   COMMAND_TIMEOUT_S=0.5
   FRANKA_GRIPPER=1                 # set 0 to disable Franka Hand init
+  GRIPPER_FOLLOW_MODE=intent       # intent | binary | waypoint (see _gripper_command_loop)
+  GRIPPER_SETTLE_S=0.15            # leader considered still after this long without change
+  GRIPPER_DEADBAND_M=0.004         # settled width error tolerated (m)
+  GRIPPER_STOP_LEAD_M=0.004        # stop() this far before target to absorb latency (m)
   ALLOWED_CLIENT_IP=<client-ip>      # optional allowlist (direct-connect only)
 """
 
@@ -597,8 +601,9 @@ class AppState:
     last_control_error: str | None
     command_timeout_s: float
     # Franka Hand (optional; shares robot IP, separate libfranka connection).
-    # Command model follows GELLO: home once, then Move-only, wait for completion
-    # before accepting the next target (no Grasp, no mid-move stop spam).
+    # Homing follows GELLO (home once, Move-only, no Grasp). Streaming does NOT:
+    # see _gripper_command_loop for why (Move is point-to-point; every retarget
+    # costs a stop()).
     gripper: object | None = None
     gripper_lock: threading.Lock = field(default_factory=threading.Lock)
     gripper_busy: bool = False
@@ -606,14 +611,25 @@ class AppState:
     gripper_last_error: str | None = None
     gripper_max_width_m: float = DEFAULT_FRANKA_HAND_MAX_WIDTH_M
     gripper_motion_thread: threading.Thread | None = None
+    gripper_motion_gen: int = 0  # generation counter: stale move threads must not clear busy
     gripper_cmd_thread: threading.Thread | None = None
+    # Latest leader target + intent.
     gripper_target_width_m: float | None = None
     gripper_target_speed_m_s: float = 0.1
+    gripper_target_t_s: float = 0.0  # wall time of last target change
+    gripper_target_dir: int = 0  # +1 opening, -1 closing (leader direction)
+    # What the Hand is currently heading to (None = idle / unknown).
+    gripper_goal_width_m: float | None = None
     gripper_last_cmd_width_m: float | None = None
     gripper_width_eps_m: float = 0.002  # ~6 bits at 80 mm
-    gripper_coalesce_s: float = 0.08  # wait briefly so first Move aims nearer the true goal
-    gripper_last_delta_m: float = 0.0
-    gripper_coalesce_deadline_s: float | None = None
+    # Follow tuning — env-overridable (GRIPPER_FOLLOW_MODE, GRIPPER_SETTLE_S,
+    # GRIPPER_DEADBAND_M, GRIPPER_STOP_LEAD_M, GRIPPER_BINARY_CLOSE_FRAC/OPEN_FRAC).
+    gripper_follow_mode: str = "intent"  # intent | binary | waypoint
+    gripper_settle_s: float = 0.15  # leader "still" if target unchanged this long
+    gripper_deadband_m: float = 0.004  # ignore settled errors below this
+    gripper_stop_lead_m: float = 0.004  # stop() this early to absorb command latency
+    gripper_binary_close_frac: float = 0.6  # binary mode: close when leader ≥ 60% closed
+    gripper_binary_open_frac: float = 0.4  # binary mode: open when leader ≤ 40% closed
 
 
 
@@ -696,9 +712,10 @@ def _release_gripper(st: AppState) -> bool:
         st.gripper_busy = False
         st.gripper_homed = False
         st.gripper_target_width_m = None
+        st.gripper_target_dir = 0
+        st.gripper_goal_width_m = None
         st.gripper_last_cmd_width_m = None
-        st.gripper_last_delta_m = 0.0
-        st.gripper_coalesce_deadline_s = None
+        st.gripper_motion_gen += 1
     if g is None:
         return False
     _gripper_stop_best_effort(g)
@@ -717,11 +734,16 @@ def _clamp_gripper_speed(speed_m_s: float) -> float:
 
 
 def _set_gripper_target(st: AppState, *, width_m: float, speed_m_s: float) -> dict[str, Any]:
-    """Queue latest width target (preemptable streaming; applied by command loop)."""
+    """Record the latest leader width + direction intent; applied by the command loop."""
     _require_gripper(st)
     width = max(0.0, min(float(st.gripper_max_width_m), float(width_m)))
     speed = _clamp_gripper_speed(speed_m_s)
     with st.gripper_lock:
+        prev = st.gripper_target_width_m
+        if prev is None or abs(width - float(prev)) >= 1e-4:
+            if prev is not None:
+                st.gripper_target_dir = 1 if width > float(prev) else -1
+            st.gripper_target_t_s = time.time()
         st.gripper_target_width_m = width
         st.gripper_target_speed_m_s = speed
         busy = bool(st.gripper_busy)
@@ -771,43 +793,73 @@ def _blocking_gripper_move(st: AppState, *, width_m: float, speed_m_s: float) ->
             st.gripper_busy = False
 
 
-def _start_async_move(g: object, width: float, speed: float, *, preempt: bool) -> None:
-    """Start a Move. Only ``stop()`` when preempting (e.g. direction reverse)."""
+def _issue_move(st: AppState, g: object, width: float, speed: float, *, preempt: bool) -> None:
+    """Start ``g.move`` in a background thread; ``busy`` stays True until it returns.
+
+    ``preempt`` sends ``stop()`` first so the Hand accepts the new Move. A
+    generation counter guards against a stale (preempted) thread clearing
+    ``busy`` after a newer Move has already started.
+    """
     if preempt:
         _gripper_stop_best_effort(g)
-    if hasattr(g, "move_async"):
-        g.move_async(float(width), float(speed))
-        return
+
+    with st.gripper_lock:
+        st.gripper_motion_gen += 1
+        gen = st.gripper_motion_gen
+        st.gripper_busy = True
+        st.gripper_goal_width_m = float(width)
 
     def _run() -> None:
+        err: str | None = None
         try:
-            g.move(float(width), float(speed))
-        except Exception:
-            pass
+            ok = bool(g.move(float(width), float(speed)))
+            if not ok:
+                err = "move returned False"
+        except Exception as e:  # CommandException on preempt is expected
+            err = f"{type(e).__name__}: {e}"
+        finally:
+            with st.gripper_lock:
+                if st.gripper_motion_gen == gen:
+                    st.gripper_busy = False
+                    st.gripper_last_cmd_width_m = float(width)
+                    st.gripper_last_error = err
 
-    threading.Thread(target=_run, name="franka-gripper-move", daemon=True).start()
+    t = threading.Thread(target=_run, name="franka-gripper-move", daemon=True)
+    with st.gripper_lock:
+        st.gripper_motion_thread = t
+    t.start()
 
 
 def _gripper_command_loop(*, st: AppState) -> None:
-    """Smooth teleop streaming for the Franka Hand.
+    """Franka Hand teleop follower.
 
-    Why "small hop then big jump" happened before
-    ---------------------------------------------
-    Every bit update did ``stop() + move_async(new_width)``. ``stop()`` kills
-    finger velocity, so during a continuous open/close the Hand only crept a
-    few millimetres between stops. When the leader finally settled, one
-    uninterrupted Move covered the remaining stroke — felt as a late lunge.
+    Why chained Moves stutter
+    -------------------------
+    libfranka ``Gripper.move(width, speed)`` is point-to-point: it ramps up,
+    travels, and *decelerates to a stop* at ``width``. It cannot be retargeted
+    in flight; a new Move needs ``stop()`` first, which also halts the fingers.
+    So any scheme that feeds intermediate leader widths — GELLO's
+    wait-for-completion or stop+move per sample — produces one visible halt per
+    segment. GELLO gets away with it because its leader is effectively binary.
 
-    Strategy now (middle ground between GELLO wait-for-done and stop-spam)
-    ---------------------------------------------------------------------
-    1. Let each Move *finish* (no mid-stroke ``stop()`` on same-direction updates).
-    2. While a Move runs, only remember the latest target width.
-    3. When the Move finishes, immediately start a new Move to that *latest*
-       target (skip intermediate waypoints).
-    4. Before the *first* Move of a burst, coalesce ~80 ms so the first aim
-       point is closer to where the leader already is (avoids a tiny opener).
-    5. ``stop()`` only on direction reverse.
+    Modes (``GRIPPER_FOLLOW_MODE``)
+    -------------------------------
+    intent (default)
+        While the leader is *moving* (target changed within ``settle_s``),
+        command one uninterrupted Move toward the extreme in that direction
+        (fully open / fully closed). When the leader *settles*, watch the live
+        width and ``stop()`` as the fingers pass the settled target
+        (``stop_lead_m`` early to absorb latency). Result: one smooth stroke
+        that ends where the leader ended; continuous width preserved.
+    binary
+        Hysteresis open/close (``binary_close_frac`` / ``binary_open_frac``).
+        One Move per transition, never a mid-stroke stop. Most robust; what
+        most Franka-Hand teleop stacks (incl. GELLO) effectively do.
+    waypoint
+        Idle-only Move to the latest target (GELLO-style). Stutters on
+        continuous input; kept for comparison.
     """
+    mode = (st.gripper_follow_mode or "intent").strip().lower()
     period_s = 0.01
     while not st.shutdown.is_set():
         time.sleep(period_s)
@@ -817,79 +869,86 @@ def _gripper_command_loop(*, st: AppState) -> None:
 
         with st.gripper_lock:
             if not st.gripper_homed:
-                st.gripper_coalesce_deadline_s = None
                 continue
-            if st.gripper_busy:
-                continue
-
             target = st.gripper_target_width_m
-            speed = st.gripper_target_speed_m_s
-            last = st.gripper_last_cmd_width_m
-            eps = float(st.gripper_width_eps_m)
             if target is None:
-                st.gripper_coalesce_deadline_s = None
                 continue
-
-            delta = float(target) - (float(last) if last is not None else float(target))
-            if last is not None and abs(delta) < eps:
-                st.gripper_coalesce_deadline_s = None
-                continue
-
-            # Direction reverse → preempt; same-direction → wait for coalesce / idle.
-            reverse = (
-                last is not None
-                and abs(st.gripper_last_delta_m) > eps
-                and (delta * st.gripper_last_delta_m) < 0.0
-            )
-
-            now = time.time()
-            if reverse:
-                st.gripper_coalesce_deadline_s = None
-            else:
-                if st.gripper_coalesce_deadline_s is None:
-                    # First sample of a new burst — wait for leader to move further.
-                    st.gripper_coalesce_deadline_s = now + float(st.gripper_coalesce_s)
-                    continue
-                if now < float(st.gripper_coalesce_deadline_s):
-                    continue
-                st.gripper_coalesce_deadline_s = None
-
-            width = float(target)
-            speed = _clamp_gripper_speed(speed)
-            st.gripper_busy = True
-            st.gripper_last_cmd_width_m = width
-            st.gripper_last_delta_m = delta if last is not None else 0.0
+            target = float(target)
+            speed = _clamp_gripper_speed(st.gripper_target_speed_m_s)
+            busy = bool(st.gripper_busy)
+            goal = st.gripper_goal_width_m
+            max_w = float(st.gripper_max_width_m)
+            t_change = float(st.gripper_target_t_s)
+            direction = int(st.gripper_target_dir)
+            eps = float(st.gripper_width_eps_m)
+            deadband = float(st.gripper_deadband_m)
+            settle_s = float(st.gripper_settle_s)
+            lead = float(st.gripper_stop_lead_m)
+            close_frac = float(st.gripper_binary_close_frac)
+            open_frac = float(st.gripper_binary_open_frac)
+        now = time.time()
 
         try:
-            if reverse:
-                # Hard retarget the other way.
-                _gripper_stop_best_effort(g)
-                ok = bool(g.move(width, speed))
-            else:
-                # Uninterrupted stroke toward the coalesced / latest target.
-                ok = bool(g.move(width, speed))
-            with st.gripper_lock:
-                st.gripper_last_error = None if ok else "move returned False"
+            if mode == "binary":
+                frac_closed = 1.0 - (target / max_w if max_w > 0 else 0.0)
+                if goal is None:
+                    desired = 0.0 if frac_closed >= 0.5 else max_w
+                else:
+                    goal_is_closed = float(goal) <= max_w * 0.5
+                    if goal_is_closed and frac_closed <= open_frac:
+                        desired = max_w
+                    elif (not goal_is_closed) and frac_closed >= close_frac:
+                        desired = 0.0
+                    else:
+                        desired = float(goal)
+                if goal is None or abs(desired - float(goal)) > eps:
+                    _issue_move(st, g, desired, speed, preempt=busy)
+                continue
+
+            if mode == "waypoint":
+                if not busy and (goal is None or abs(target - float(goal)) > deadband):
+                    _issue_move(st, g, target, speed, preempt=False)
+                continue
+
+            # ── intent ────────────────────────────────────────────────────
+            leader_moving = direction != 0 and (now - t_change) < settle_s
+
+            if leader_moving:
+                desired = max_w if direction > 0 else 0.0
+                if goal is None or abs(desired - float(goal)) > eps:
+                    # Already heading the same way → nothing to do (no stop).
+                    # Otherwise retarget; stop() only if a Move is in flight.
+                    _issue_move(st, g, desired, speed, preempt=busy)
+                continue
+
+            # Leader settled at `target`.
+            if busy and goal is not None and abs(float(goal) - target) > deadband:
+                # Hand is en route to an extreme beyond the settled target:
+                # halt exactly as the fingers pass it.
+                try:
+                    w = _read_gripper_width_m(g)
+                except Exception:
+                    continue  # can't observe; let the Move finish
+                heading_open = float(goal) > target
+                reached = (w >= target - lead) if heading_open else (w <= target + lead)
+                if reached:
+                    _gripper_stop_best_effort(g)
+                    with st.gripper_lock:
+                        st.gripper_goal_width_m = float(w)
+                continue
+
+            if not busy:
+                try:
+                    w = _read_gripper_width_m(g)
+                except Exception:
+                    w = float(goal) if goal is not None else target
+                if abs(target - w) > deadband:
+                    # Small settled correction (e.g. stop() overshoot).
+                    _issue_move(st, g, target, speed, preempt=False)
         except Exception as e:
             with st.gripper_lock:
                 st.gripper_last_error = f"{type(e).__name__}: {e}"
-                st.gripper_last_cmd_width_m = None
-            LOG.warning("Franka Hand move failed: %s", e)
-        finally:
-            with st.gripper_lock:
-                st.gripper_busy = False
-                # If the leader kept moving during this stroke, do not coalesce
-                # again — immediately aim at the newest target next iteration.
-                tgt = st.gripper_target_width_m
-                last_cmd = st.gripper_last_cmd_width_m
-                if (
-                    tgt is not None
-                    and last_cmd is not None
-                    and abs(float(tgt) - float(last_cmd)) >= float(st.gripper_width_eps_m)
-                ):
-                    st.gripper_coalesce_deadline_s = 0.0  # fire ASAP next loop
-                else:
-                    st.gripper_coalesce_deadline_s = None
+            LOG.warning("Franka Hand follow loop error: %s", e)
 
 
 def _home_gripper_gello_style(st: AppState, g: object, *, force: bool) -> dict[str, Any]:
@@ -1077,7 +1136,18 @@ async def _lifespan(app: FastAPI):
             daemon=True,
         )
         st.gripper_cmd_thread.start()
-        LOG.info("Franka Hand enabled (lazy connect via POST /connect)")
+        # Follow-tuning knobs (see _gripper_command_loop docstring).
+        st.gripper_follow_mode = os.getenv("GRIPPER_FOLLOW_MODE", st.gripper_follow_mode).strip().lower()
+        st.gripper_settle_s = _get_env_float("GRIPPER_SETTLE_S", st.gripper_settle_s)
+        st.gripper_deadband_m = _get_env_float("GRIPPER_DEADBAND_M", st.gripper_deadband_m)
+        st.gripper_stop_lead_m = _get_env_float("GRIPPER_STOP_LEAD_M", st.gripper_stop_lead_m)
+        st.gripper_binary_close_frac = _get_env_float("GRIPPER_BINARY_CLOSE_FRAC", st.gripper_binary_close_frac)
+        st.gripper_binary_open_frac = _get_env_float("GRIPPER_BINARY_OPEN_FRAC", st.gripper_binary_open_frac)
+        LOG.info(
+            "Franka Hand enabled (lazy connect via POST /connect); follow_mode=%s settle_s=%.3f "
+            "deadband_m=%.4f stop_lead_m=%.4f",
+            st.gripper_follow_mode, st.gripper_settle_s, st.gripper_deadband_m, st.gripper_stop_lead_m,
+        )
     else:
         LOG.info("Franka Hand disabled (FRANKA_GRIPPER=0)")
 
@@ -1494,25 +1564,27 @@ def gripper_state(
         homed = bool(st.gripper_homed)
         max_w = float(st.gripper_max_width_m)
 
-    if busy:
-        return {
-            "connected": True,
-            "position_bits": None,
-            "max_position_bits": 255,
-            "position_frac": None,
-            "width_m": None,
-            "max_width_m": max_w,
-            "is_closed": None,
-            "is_open": None,
-            "is_activated": homed,
-            "is_calibrated": homed,
-            "busy": True,
-            "backend": "franka_hand",
-        }
-
+    # Width is read over the gripper's UDP state stream, independent of the TCP
+    # command channel, so it is safe to sample while a Move is in flight. This
+    # keeps recorded gripper observations live during motion.
     try:
         width = _read_gripper_width_m(g)
     except Exception as e:
+        if busy:
+            return {
+                "connected": True,
+                "position_bits": None,
+                "max_position_bits": 255,
+                "position_frac": None,
+                "width_m": None,
+                "max_width_m": max_w,
+                "is_closed": None,
+                "is_open": None,
+                "is_activated": homed,
+                "is_calibrated": homed,
+                "busy": True,
+                "backend": "franka_hand",
+            }
         raise HTTPException(
             status_code=503,
             detail={"error": "Failed to read Franka Hand width", "exc": repr(e)},
@@ -1531,7 +1603,7 @@ def gripper_state(
         "is_open": not is_closed,
         "is_activated": homed,
         "is_calibrated": homed,
-        "busy": False,
+        "busy": busy,
         "backend": "franka_hand",
     }
 
