@@ -610,7 +610,10 @@ class AppState:
     gripper_target_width_m: float | None = None
     gripper_target_speed_m_s: float = 0.1
     gripper_last_cmd_width_m: float | None = None
-    gripper_width_eps_m: float = 0.0015  # ~2 bits at 80 mm — ignore tiny chatter
+    gripper_width_eps_m: float = 0.002  # ~6 bits at 80 mm
+    gripper_coalesce_s: float = 0.08  # wait briefly so first Move aims nearer the true goal
+    gripper_last_delta_m: float = 0.0
+    gripper_coalesce_deadline_s: float | None = None
 
 
 
@@ -694,6 +697,8 @@ def _release_gripper(st: AppState) -> bool:
         st.gripper_homed = False
         st.gripper_target_width_m = None
         st.gripper_last_cmd_width_m = None
+        st.gripper_last_delta_m = 0.0
+        st.gripper_coalesce_deadline_s = None
     if g is None:
         return False
     _gripper_stop_best_effort(g)
@@ -766,13 +771,14 @@ def _blocking_gripper_move(st: AppState, *, width_m: float, speed_m_s: float) ->
             st.gripper_busy = False
 
 
-def _start_async_move(g: object, width: float, speed: float) -> None:
-    """Start a non-blocking Move (preempt previous with stop first)."""
-    _gripper_stop_best_effort(g)
+def _start_async_move(g: object, width: float, speed: float, *, preempt: bool) -> None:
+    """Start a Move. Only ``stop()`` when preempting (e.g. direction reverse)."""
+    if preempt:
+        _gripper_stop_best_effort(g)
     if hasattr(g, "move_async"):
         g.move_async(float(width), float(speed))
         return
-    # Fallback: blocking move in a short-lived thread (still preemptable via stop()).
+
     def _run() -> None:
         try:
             g.move(float(width), float(speed))
@@ -783,15 +789,26 @@ def _start_async_move(g: object, width: float, speed: float) -> None:
 
 
 def _gripper_command_loop(*, st: AppState) -> None:
-    """Stream latest gripper width with preemption — low lag for teleop.
+    """Smooth teleop streaming for the Franka Hand.
 
-    Unlike GELLO's wait-for-completion gate (which feels laggy for continuous
-    teleop), this loop:
-      1. polls the latest target at ~50 Hz
-      2. if it differs from the last *commanded* width, stop + move_async
-      3. never waits for the Move to finish before accepting a newer target
+    Why "small hop then big jump" happened before
+    ---------------------------------------------
+    Every bit update did ``stop() + move_async(new_width)``. ``stop()`` kills
+    finger velocity, so during a continuous open/close the Hand only crept a
+    few millimetres between stops. When the leader finally settled, one
+    uninterrupted Move covered the remaining stroke — felt as a late lunge.
+
+    Strategy now (middle ground between GELLO wait-for-done and stop-spam)
+    ---------------------------------------------------------------------
+    1. Let each Move *finish* (no mid-stroke ``stop()`` on same-direction updates).
+    2. While a Move runs, only remember the latest target width.
+    3. When the Move finishes, immediately start a new Move to that *latest*
+       target (skip intermediate waypoints).
+    4. Before the *first* Move of a burst, coalesce ~80 ms so the first aim
+       point is closer to where the leader already is (avoids a tiny opener).
+    5. ``stop()`` only on direction reverse.
     """
-    period_s = 0.02  # 50 Hz
+    period_s = 0.01
     while not st.shutdown.is_set():
         time.sleep(period_s)
         g = st.gripper
@@ -800,34 +817,79 @@ def _gripper_command_loop(*, st: AppState) -> None:
 
         with st.gripper_lock:
             if not st.gripper_homed:
+                st.gripper_coalesce_deadline_s = None
                 continue
+            if st.gripper_busy:
+                continue
+
             target = st.gripper_target_width_m
             speed = st.gripper_target_speed_m_s
             last = st.gripper_last_cmd_width_m
-            eps = st.gripper_width_eps_m
+            eps = float(st.gripper_width_eps_m)
             if target is None:
+                st.gripper_coalesce_deadline_s = None
                 continue
-            if last is not None and abs(float(target) - float(last)) < float(eps):
+
+            delta = float(target) - (float(last) if last is not None else float(target))
+            if last is not None and abs(delta) < eps:
+                st.gripper_coalesce_deadline_s = None
                 continue
+
+            # Direction reverse → preempt; same-direction → wait for coalesce / idle.
+            reverse = (
+                last is not None
+                and abs(st.gripper_last_delta_m) > eps
+                and (delta * st.gripper_last_delta_m) < 0.0
+            )
+
+            now = time.time()
+            if reverse:
+                st.gripper_coalesce_deadline_s = None
+            else:
+                if st.gripper_coalesce_deadline_s is None:
+                    # First sample of a new burst — wait for leader to move further.
+                    st.gripper_coalesce_deadline_s = now + float(st.gripper_coalesce_s)
+                    continue
+                if now < float(st.gripper_coalesce_deadline_s):
+                    continue
+                st.gripper_coalesce_deadline_s = None
+
             width = float(target)
             speed = _clamp_gripper_speed(speed)
-            # Mark commanded immediately so we do not re-issue the same width.
-            st.gripper_last_cmd_width_m = width
             st.gripper_busy = True
+            st.gripper_last_cmd_width_m = width
+            st.gripper_last_delta_m = delta if last is not None else 0.0
 
         try:
-            _start_async_move(g, width, speed)
+            if reverse:
+                # Hard retarget the other way.
+                _gripper_stop_best_effort(g)
+                ok = bool(g.move(width, speed))
+            else:
+                # Uninterrupted stroke toward the coalesced / latest target.
+                ok = bool(g.move(width, speed))
             with st.gripper_lock:
-                st.gripper_last_error = None
+                st.gripper_last_error = None if ok else "move returned False"
         except Exception as e:
             with st.gripper_lock:
                 st.gripper_last_error = f"{type(e).__name__}: {e}"
-                # Allow retry of the same target after a fault.
                 st.gripper_last_cmd_width_m = None
-            LOG.warning("Franka Hand move_async failed: %s", e)
+            LOG.warning("Franka Hand move failed: %s", e)
         finally:
             with st.gripper_lock:
                 st.gripper_busy = False
+                # If the leader kept moving during this stroke, do not coalesce
+                # again — immediately aim at the newest target next iteration.
+                tgt = st.gripper_target_width_m
+                last_cmd = st.gripper_last_cmd_width_m
+                if (
+                    tgt is not None
+                    and last_cmd is not None
+                    and abs(float(tgt) - float(last_cmd)) >= float(st.gripper_width_eps_m)
+                ):
+                    st.gripper_coalesce_deadline_s = 0.0  # fire ASAP next loop
+                else:
+                    st.gripper_coalesce_deadline_s = None
 
 
 def _home_gripper_gello_style(st: AppState, g: object, *, force: bool) -> dict[str, Any]:

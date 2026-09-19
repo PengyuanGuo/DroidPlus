@@ -122,7 +122,7 @@ def run_teleop_episode(
                 if so101_gripper_deg is not None:
                     robotiq_pos = so101_gripper_to_robotiq(so101_gripper_deg)
                     gripper_cmd_frac = float(robotiq_pos) / 255.0
-                    if last_gripper_pos is None or abs(robotiq_pos - last_gripper_pos) > 2:
+                    if last_gripper_pos is None or abs(robotiq_pos - last_gripper_pos) > 4:
                         try:
                             droid.gripper.go_to_async(robotiq_pos, speed=255, wait=False)
                             last_gripper_pos = robotiq_pos
