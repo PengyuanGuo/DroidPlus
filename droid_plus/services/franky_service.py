@@ -1122,7 +1122,7 @@ async def _lifespan(app: FastAPI):
     )
     app.state.franky_state = st
     st.robot = franky.Robot(robot_ip)
-    st.robot.relative_dynamics_factor = franky.RelativeDynamicsFactor(0.5, 0.4, 0.1)
+    st.robot.relative_dynamics_factor = franky.RelativeDynamicsFactor(0.4, 0.3, 0.1)
 
     # Franka Hand: do NOT connect at startup. Holding a libfranka Gripper
     # connection makes Desk show "End effector not connected" (red) for as
