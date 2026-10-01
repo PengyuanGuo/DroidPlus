@@ -133,9 +133,21 @@ def run_teleop_episode(
             # Sub-rate recording.
             if recorder is not None and session.record and seq % record_every_n == 0:
                 try:
-                    left_rgb = droid.get_left_image(jpeg_quality=session.record_jpeg_quality)
-                    wrist_rgb = droid.get_wrist_image(jpeg_quality=session.record_jpeg_quality)
-                    right_rgb = droid.get_right_image(jpeg_quality=session.record_jpeg_quality)
+                    # Skip roles whose serial is unset. An empty id becomes
+                    # /camera//rgb.jpg and a 404 aborts the whole step.
+                    jpeg_q = session.record_jpeg_quality
+                    left_rgb = (
+                        droid.get_left_image(jpeg_quality=jpeg_q)
+                        if droid.left_camera_id else None
+                    )
+                    wrist_rgb = (
+                        droid.get_wrist_image(jpeg_quality=jpeg_q)
+                        if droid.wrist_camera_id else None
+                    )
+                    right_rgb = (
+                        droid.get_right_image(jpeg_quality=jpeg_q)
+                        if droid.right_camera_id else None
+                    )
 
                     js = droid.get_current_joint_state()
                     q_state = np.asarray(js["positions"], dtype=np.float64)

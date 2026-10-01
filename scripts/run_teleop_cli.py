@@ -240,14 +240,25 @@ def _episode_loop(
 
             recorder: EpisodeRecorder | None = None
             if session.record and base_run_dir is not None:
+                record_cameras = [
+                    name for name, cid in (
+                        ("left", droid.left_camera_id),
+                        ("wrist", droid.wrist_camera_id),
+                        ("right", droid.right_camera_id),
+                    )
+                    if cid
+                ]
+                if not record_cameras:
+                    print(f"{_YELLOW}No camera serials set "
+                          f"(LEFT/WRIST/RIGHT_CAMERA_SERIAL) — recording state only.{_RESET}")
                 recorder = EpisodeRecorder(
                     base_run_dir=base_run_dir,
                     episode_idx=episode_idx,
                     jpeg_quality=session.record_jpeg_quality,
-                    cameras=["left", "wrist", "right"],
+                    cameras=record_cameras or ["left"],
                 )
                 print(f"Recording episode {episode_idx} to {recorder.episode_dir}  "
-                      f"(rate={session.record_rate_hz} Hz)")
+                      f"(rate={session.record_rate_hz} Hz, cameras={record_cameras or 'none'})")
 
             should_stop = _make_cli_should_stop(keys, stop_flag)
             result = run_teleop_episode(
