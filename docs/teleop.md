@@ -129,8 +129,12 @@ The browser saves `experiment_service` / `teleop_service` form state to `localSt
 |----------|---------|-------------|
 | `--web-port` | `54325` | Web server port |
 | `--port` | `/dev/ttyACM0` | SO-101 serial port |
-| `--franky-service-url` | from `constants.py` | Franky service URL (URDF fetch) |
-| `--no-gripper` | off | Skip gripper initialization |
+| `--franky-service-url` | from `constants.py` | Franky service URL (arm + optional Hand) |
+| `--gripper` | `robotiq` | `robotiq` \| `franka` \| `none` |
+| `--no-gripper` | off | Alias for `--gripper none` |
+| `--left-camera-id` | `LEFT_CAMERA_SERIAL` | Left camera serial/id |
+| `--wrist-camera-id` | `WRIST_CAMERA_SERIAL` | Wrist camera serial/id |
+| `--right-camera-id` | `RIGHT_CAMERA_SERIAL` | Right camera serial/id |
 | `--rate-hz` | `100.0` | Control loop rate (Hz) |
 | `--min-z` | `0.23` | Initial safety z floor (editable in UI) |
 | `--record-rate-hz` | `15.0` | Recording rate (Hz) |

@@ -23,7 +23,14 @@ import time
 from typing import Any, Callable
 
 from droid_plus.analysis.end_effector_pose import compute_and_save_ee_trajectory_single
-from droid_plus.constants import FRANKY_SERVICE_URL, GRIPPER_SERVICE_URL, RECORD_JPEG_QUALITY
+from droid_plus.constants import (
+    FRANKY_SERVICE_URL,
+    GRIPPER_SERVICE_URL,
+    LEFT_CAMERA_SERIAL,
+    RECORD_JPEG_QUALITY,
+    RIGHT_CAMERA_SERIAL,
+    WRIST_CAMERA_SERIAL,
+)
 from droid_plus.datagen import (
     DEFAULT_MIN_EE_Z,
     TeleopSessionConfig,
@@ -87,6 +94,12 @@ def main() -> None:
         help="Recording rate (images + state/action captured at this rate)")
     parser.add_argument("--record-jpeg-quality", type=int, default=RECORD_JPEG_QUALITY,
         help=f"JPEG quality for recorded images (default: {RECORD_JPEG_QUALITY})")
+    parser.add_argument("--left-camera-id", default=LEFT_CAMERA_SERIAL,
+        help="Left camera serial/id (default: LEFT_CAMERA_SERIAL)")
+    parser.add_argument("--wrist-camera-id", default=WRIST_CAMERA_SERIAL,
+        help="Wrist camera serial/id (default: WRIST_CAMERA_SERIAL)")
+    parser.add_argument("--right-camera-id", default=RIGHT_CAMERA_SERIAL,
+        help="Right camera serial/id (default: RIGHT_CAMERA_SERIAL)")
     parser.add_argument("--output-dir", default="output", help="Base output directory for recordings")
     parser.add_argument("--task", default="", help="Task name (recorded in meta.json + run dir)")
     parser.add_argument("--notes", default="", help="Free-form notes (recorded in meta.json)")
@@ -119,6 +132,9 @@ def main() -> None:
     droid = DroidPlus(
         franky_service_url=args.franky_service_url,
         gripper_service_url=gripper_url,
+        left_camera_serial=args.left_camera_id,
+        wrist_camera_serial=args.wrist_camera_id,
+        right_camera_serial=args.right_camera_id,
     )
     wait_for_cameras(droid)
 
@@ -249,13 +265,14 @@ def _episode_loop(
                     if cid
                 ]
                 if not record_cameras:
-                    print(f"{_YELLOW}No camera serials set "
-                          f"(LEFT/WRIST/RIGHT_CAMERA_SERIAL) — recording state only.{_RESET}")
+                    print(f"{_YELLOW}No camera ids set "
+                          f"(--left-camera-id / --wrist-camera-id / --right-camera-id) "
+                          f"— recording state only.{_RESET}")
                 recorder = EpisodeRecorder(
                     base_run_dir=base_run_dir,
                     episode_idx=episode_idx,
                     jpeg_quality=session.record_jpeg_quality,
-                    cameras=record_cameras or ["left"],
+                    cameras=record_cameras or ["left", "wrist"],
                 )
                 print(f"Recording episode {episode_idx} to {recorder.episode_dir}  "
                       f"(rate={session.record_rate_hz} Hz, cameras={record_cameras or 'none'})")

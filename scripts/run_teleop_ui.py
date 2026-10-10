@@ -10,8 +10,10 @@ from the browser (Enter / Esc, or the terminal's ESC key).
 
 Usage:
     python scripts/run_teleop_ui.py
-    python scripts/run_teleop_ui.py --port /dev/ttyACM1
-    python scripts/run_teleop_ui.py --no-gripper --web-port 54325
+    python scripts/run_teleop_ui.py --port /dev/ttyACM1 --web-port 54325
+    python scripts/run_teleop_ui.py --gripper franka \\
+        --left-camera-id 31262010 --wrist-camera-id 14633207 \\
+        --output-dir output_100926
 """
 from __future__ import annotations
 
@@ -28,7 +30,14 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import HTMLResponse
 
 from droid_plus.analysis.end_effector_pose import compute_and_save_ee_trajectory_single
-from droid_plus.constants import FRANKY_SERVICE_URL, RECORD_JPEG_QUALITY
+from droid_plus.constants import (
+    FRANKY_SERVICE_URL,
+    GRIPPER_SERVICE_URL,
+    LEFT_CAMERA_SERIAL,
+    RECORD_JPEG_QUALITY,
+    RIGHT_CAMERA_SERIAL,
+    WRIST_CAMERA_SERIAL,
+)
 from droid_plus.datagen import (
     DEFAULT_MIN_EE_Z,
     TeleopSessionConfig,
@@ -90,11 +99,19 @@ def _run_episode_thread(state: AppState) -> None:
     try:
         recorder: EpisodeRecorder | None = None
         if state.session.record and state.base_run_dir is not None:
+            record_cameras = [
+                name for name, cid in (
+                    ("left", state.droid.left_camera_id),
+                    ("wrist", state.droid.wrist_camera_id),
+                    ("right", state.droid.right_camera_id),
+                )
+                if cid
+            ]
             recorder = EpisodeRecorder(
                 base_run_dir=state.base_run_dir,
                 episode_idx=state.episode_idx,
                 jpeg_quality=state.session.record_jpeg_quality,
-                cameras=["left", "wrist", "right"],
+                cameras=record_cameras or ["left", "wrist"],
             )
 
         result = run_teleop_episode(
@@ -820,8 +837,22 @@ def main() -> None:
         help=f"Web server port (default: {DEFAULT_PORT})")
     p.add_argument("--port", default="/dev/ttyACM0", help="SO-101 leader serial port")
     p.add_argument("--franky-service-url", default=FRANKY_SERVICE_URL,
-        help="Franky service URL (used for URDF fetch)")
-    p.add_argument("--no-gripper", action="store_true", help="Skip gripper initialization")
+        help="Franky service URL (robot control + URDF fetch)")
+    p.add_argument(
+        "--gripper",
+        choices=["none", "robotiq", "franka"],
+        default="robotiq",
+        help="Gripper backend: robotiq (local gripper_service), franka (Hand via franky_service), none",
+    )
+    p.add_argument("--no-gripper", action="store_true", help="Alias for --gripper none")
+    p.add_argument("--gripper-service-url", default=GRIPPER_SERVICE_URL,
+        help="Robotiq gripper_service URL (ignored when --gripper franka)")
+    p.add_argument("--left-camera-id", default=LEFT_CAMERA_SERIAL,
+        help="Left camera serial/id (default: LEFT_CAMERA_SERIAL)")
+    p.add_argument("--wrist-camera-id", default=WRIST_CAMERA_SERIAL,
+        help="Wrist camera serial/id (default: WRIST_CAMERA_SERIAL)")
+    p.add_argument("--right-camera-id", default=RIGHT_CAMERA_SERIAL,
+        help="Right camera serial/id (default: RIGHT_CAMERA_SERIAL)")
     p.add_argument("--rate-hz", type=float, default=100.0, help="Control loop rate (Hz)")
     p.add_argument("--min-z", type=float, default=DEFAULT_MIN_EE_Z,
         help=f"Min EE Z height (m) — table safety (default: {DEFAULT_MIN_EE_Z})")
@@ -836,6 +867,12 @@ def main() -> None:
         help="Read SO-101 but do not command the robot or gripper")
     args = p.parse_args()
 
+    gripper_backend = "none" if args.no_gripper else str(args.gripper)
+    if gripper_backend == "franka":
+        gripper_url = str(args.franky_service_url)
+    else:
+        gripper_url = str(args.gripper_service_url)
+
     session = TeleopSessionConfig(
         rate_hz=float(args.rate_hz),
         record_rate_hz=float(args.record_rate_hz),
@@ -847,10 +884,23 @@ def main() -> None:
     )
 
     print("Initializing robot...")
-    droid = DroidPlus()
+    print(f"Franky service: {args.franky_service_url}")
+    print(f"Gripper backend: {gripper_backend}"
+          + (f" ({gripper_url})" if gripper_backend != "none" else ""))
+    droid = DroidPlus(
+        franky_service_url=args.franky_service_url,
+        gripper_service_url=gripper_url,
+        left_camera_serial=args.left_camera_id,
+        wrist_camera_serial=args.wrist_camera_id,
+        right_camera_serial=args.right_camera_id,
+    )
     wait_for_cameras(droid)
 
-    pin_model, pin_data, ee_frame = build_fk_model(args.franky_service_url)
+    try:
+        pin_model, pin_data, ee_frame = build_fk_model(args.franky_service_url)
+    except Exception as e:
+        print(f"WARNING: FK unavailable ({e}) — Z safety DISABLED")
+        pin_model = pin_data = ee_frame = None
 
     try:
         droid.stop()
@@ -858,13 +908,14 @@ def main() -> None:
         pass
 
     gripper_initialized = False
-    if not args.no_gripper and not args.dry_run:
-        gripper_initialized = init_gripper(droid)
+    if gripper_backend != "none" and not args.dry_run:
+        gripper_initialized = init_gripper(droid, backend=gripper_backend)
     else:
-        reason = "dry-run" if args.dry_run else "--no-gripper"
+        reason = "dry-run" if args.dry_run else "--gripper none"
         print(f"Skipping gripper initialization ({reason}).")
 
-    teleop = connect_so101(args.port, settle_s=2.0 if gripper_initialized else 0.0)
+    settle_s = 2.0 if (gripper_initialized and gripper_backend == "robotiq") else 0.0
+    teleop = connect_so101(args.port, settle_s=settle_s)
 
     base_run_dir: str | None = None
     if session.record:
@@ -920,6 +971,12 @@ def main() -> None:
             droid.gripper.shutdown_async()
         except Exception:
             pass
+        if gripper_backend == "franka":
+            try:
+                droid.gripper.disconnect()
+                print("Franka Hand connection released.")
+            except Exception as e:
+                print(f"Warning: could not release Franka Hand: {e}")
 
 
 if __name__ == "__main__":

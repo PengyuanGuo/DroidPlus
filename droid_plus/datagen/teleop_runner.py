@@ -21,7 +21,6 @@ from droid_plus.datagen.safety import DEFAULT_MIN_EE_Z, enforce_min_z
 from droid_plus.datagen.so101 import (
     action_to_so101_joints_deg,
     extract_so101_gripper_deg,
-    so101_gripper_to_robotiq,
     so101_to_franka,
 )
 from droid_plus.eval.episode_runner import EpisodeConfig, EpisodeResult
@@ -80,8 +79,7 @@ def run_teleop_episode(
 
     seq = 0
     rec_seq = 0
-    last_gripper_pos: int | None = None
-    last_gripper_cmd_frac: float = 0.0
+    last_gripper_cmd: float = 0.0
     q_prev_safe = np.array(HOME_POSITION, dtype=float)
 
     step_limit = config.action_step_limit if config.action_step_limit > 0 else None
@@ -114,21 +112,22 @@ def run_teleop_episode(
             if not session.dry_run:
                 droid.set_target_joint_state(q_franka, velocities=[0.0] * 7, seq=seq)
 
-            # Gripper — stream latest target; server preempts in-flight Moves.
-            # Do NOT wait on busy (that was the main teleop lag source).
-            gripper_cmd_frac = last_gripper_cmd_frac
+            # Gripper — same binary open/close as policy rollout.
+            gripper_cmd_frac = last_gripper_cmd
             if gripper_initialized and not session.dry_run:
                 so101_gripper_deg = extract_so101_gripper_deg(action)
                 if so101_gripper_deg is not None:
-                    robotiq_pos = so101_gripper_to_robotiq(so101_gripper_deg)
-                    gripper_cmd_frac = float(robotiq_pos) / 255.0
-                    if last_gripper_pos is None or abs(robotiq_pos - last_gripper_pos) > 4:
+                    # 0° = closed, 90° = open. Midpoint 45° matches policy threshold 0.5.
+                    gripper_cmd_frac = 1.0 if float(so101_gripper_deg) <= 45.0 else 0.0
+                    if gripper_cmd_frac != last_gripper_cmd:
                         try:
-                            droid.gripper.go_to_async(robotiq_pos, speed=255, wait=False)
-                            last_gripper_pos = robotiq_pos
+                            if gripper_cmd_frac >= 0.5:
+                                droid.gripper.close_async(wait=False)
+                            else:
+                                droid.gripper.open_async(wait=False)
+                            last_gripper_cmd = gripper_cmd_frac
                         except Exception:
-                            pass
-                    last_gripper_cmd_frac = gripper_cmd_frac
+                            gripper_cmd_frac = last_gripper_cmd
 
             # Sub-rate recording.
             if recorder is not None and session.record and seq % record_every_n == 0:

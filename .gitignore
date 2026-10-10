@@ -224,3 +224,7 @@ scripts/scrap.py
 
 franka_description/
 pyzed-5.4-cp310-cp310-linux_x86_64.whl
+
+/output_100926
+/output
+output*/
