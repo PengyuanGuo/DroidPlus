@@ -3,12 +3,12 @@
 #SBATCH --output=logs/%x_%j.out
 #SBATCH --error=logs/%x_%j.err
 #SBATCH --partition=a30
-#SBATCH --account=shey
+#SBATCH --account=standby
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=12
-#SBATCH --mem=24G
+#SBATCH --cpus-per-task=8
+#SBATCH --mem=60G
 #SBATCH --gres=gpu:1
-#SBATCH --time=4:00:00
+#SBATCH --time=4-00:00:00
 
 # Submit from the DroidPlus dir:  mkdir -p logs && sbatch train_dp.slurm
 set -euo pipefail
@@ -39,7 +39,7 @@ lerobot-train \
   --job_name=dp_teleop \
   --steps=50000 \
   --batch_size=32 \
-  --num_workers=10 \
+  --num_workers=6 \
   --save_freq=10000 \
   --policy.device=cuda \
   --policy.push_to_hub=false \
