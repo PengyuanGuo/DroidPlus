@@ -230,3 +230,8 @@ pyzed-5.4-cp310-cp310-linux_x86_64.whl
 output*/
 
 logs/*
+dp_ckpts/*
+experiments/
+openpi_config/
+pi05_droid_jointpos_droidplus_finetune/
+pi05_droid_jointpos_droidplus_lora/

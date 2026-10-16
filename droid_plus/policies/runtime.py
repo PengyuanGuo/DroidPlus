@@ -34,6 +34,12 @@ try:
 except ImportError:
     pass
 
+try:
+    from .diffusion_droid import DiffusionDroidClient
+    POLICY_REGISTRY["diffusion"] = DiffusionDroidClient
+except ImportError:
+    pass
+
 
 def create_client(name: str, **kwargs: Any) -> InferenceClient:
     """Construct the inference client for a given backend name.

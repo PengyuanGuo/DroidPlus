@@ -27,3 +27,10 @@ try:
     __all__.append("DreamZeroClient")
 except ImportError:
     pass
+
+try:
+    from .diffusion_droid import DiffusionDroidClient as DiffusionDroidClient
+
+    __all__.append("DiffusionDroidClient")
+except ImportError:
+    pass

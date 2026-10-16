@@ -93,6 +93,8 @@ def main() -> None:
         help="Override policy host (default: from constants.py)")
     p.add_argument("--policy-port", type=int, default=None,
         help="Override policy port (default: from constants.py)")
+    p.add_argument("--policy-path", default="experiments/dp_ckpts/dp_050000",
+        help="Local LeRobot checkpoint directory. Used when --policy diffusion.")
     p.add_argument("--open-loop-horizon", type=int, default=10, help="Policy chunk horizon")
     p.add_argument("--rate-hz", type=float, default=15.0,
         help="Control loop rate (Hz). This is the action stepping rate.")
@@ -152,7 +154,12 @@ def main() -> None:
         )
 
     # ── Resolve policy host/port ─────────────────────────────────────────
-    host, port, from_defaults = resolve_policy(args.policy, args.policy_host, args.policy_port)
+    # Diffusion is a local checkpoint, not a websocket server.
+    diffusion_path = str(args.policy_path) if args.policy == "diffusion" else ""
+    if args.policy == "diffusion":
+        host, port, from_defaults = "local", 0, False
+    else:
+        host, port, from_defaults = resolve_policy(args.policy, args.policy_host, args.policy_port)
 
     record_jpeg_quality = int(args.record_jpeg_quality)
 
@@ -182,14 +189,21 @@ def main() -> None:
         print(f"    Step limit:  {step_limit_str}")
     print("  Policy")
     print(f"    Name:        {session.policy_name}")
-    print(f"    Server:      {session.policy_host}:{session.policy_port}{source}")
+    if diffusion_path:
+        print(f"    Checkpoint:  {diffusion_path}")
+    else:
+        print(f"    Server:      {session.policy_host}:{session.policy_port}{source}")
     print(f"{'─' * 50}{_RESET}")
 
     # ── Init resources ───────────────────────────────────────────────────
     droid = DroidPlus()
     wait_for_cameras(droid)
 
-    policy = build_policy_client(session.policy_host, session.policy_port, args.open_loop_horizon)
+    if diffusion_path:
+        from droid_plus.policies.diffusion_droid import DiffusionDroidClient
+        policy = DiffusionDroidClient(diffusion_path)
+    else:
+        policy = build_policy_client(session.policy_host, session.policy_port, args.open_loop_horizon)
 
     base_run_dir: str | None = None
     if session.record:
