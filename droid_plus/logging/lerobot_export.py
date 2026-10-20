@@ -28,6 +28,7 @@ LeRobot v2.1 conventions used here
 - ``observation.images.{left,right,wrist}``: video features, always present.
   If a camera is missing for a given episode, a black MP4 of the same length
   is emitted so the dataset has a uniform feature set.
+- ``phase_index``: operator phase ID (int64), -1 for legacy unlabelled episodes.
 - Per-episode parquet schema:
     observation.state, action, timestamp, frame_index, episode_index, index, task_index
 
@@ -99,6 +100,7 @@ class EpisodeRecord:
     image_hw: Optional[tuple[int, int]]           # (H, W) discovered from any present frame
     fps_source: str              # "control.record_rate_hz" | "control.rate_hz" | "computed"
     fps_value: float
+    phase_index: np.ndarray | None = None  # None for legacy unlabelled episodes
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
@@ -176,6 +178,12 @@ def _load_episode(ep_dir: Path) -> EpisodeRecord:
         raise RuntimeError(f"Empty episode: {ep_dir}")
 
     n = len(steps)
+    phase_values = [step.get("phase_index") for step in steps]
+    phase_index = None
+    if any(value is not None for value in phase_values):
+        if any(type(value) is not int or not 0 <= value <= 127 for value in phase_values):
+            raise ValueError(f"{ep_dir}: phase_index must be present and an integer in [0, 127] on every frame")
+        phase_index = np.asarray(phase_values, dtype=np.int64)
     state = np.zeros((n, STATE_DIM), dtype=np.float32)
     action = np.zeros((n, ACTION_DIM), dtype=np.float32)
     t_wall = np.zeros((n,), dtype=np.float64)
@@ -232,6 +240,7 @@ def _load_episode(ep_dir: Path) -> EpisodeRecord:
         image_hw=image_hw,
         fps_source=fps_source,
         fps_value=fps_value,
+        phase_index=phase_index,
     )
 
 
@@ -463,6 +472,10 @@ def _write_episode_parquet(
             "episode_index": pa.array(episode_idx_col, type=pa.int64()),
             "index": pa.array(global_index, type=pa.int64()),
             "task_index": pa.array(task_idx_col, type=pa.int64()),
+            "phase_index": pa.array(
+                episode.phase_index if episode.phase_index is not None else np.full(n, -1, dtype=np.int64),
+                type=pa.int64(),
+            ),
         }
     )
     pq.write_table(table, out_path)
@@ -502,6 +515,7 @@ def _build_features(h: int, w: int, fps: float) -> dict[str, dict[str, Any]]:
     feats["frame_index"] = {"dtype": "int64", "shape": [1], "names": None}
     feats["episode_index"] = {"dtype": "int64", "shape": [1], "names": None}
     feats["index"] = {"dtype": "int64", "shape": [1], "names": None}
+    feats["phase_index"] = {"dtype": "int64", "shape": [1], "names": None}
     feats["task_index"] = {"dtype": "int64", "shape": [1], "names": None}
     return feats
 
@@ -695,6 +709,9 @@ class LeRobotExporter:
             ep_stats: dict[str, dict[str, list[float]]] = {
                 "observation.state": _array_stats(ep.state),
                 "action": _array_stats(ep.action),
+                "phase_index": _array_stats(
+                    ep.phase_index if ep.phase_index is not None else np.full(n, -1, dtype=np.int64)
+                ),
                 "timestamp": _array_stats((np.arange(n, dtype=np.float32) / float(fps))),
                 "frame_index": _array_stats(np.arange(n, dtype=np.int64).astype(np.float64)),
                 "episode_index": _array_stats(np.full((n,), new_ep_idx, dtype=np.float64)),

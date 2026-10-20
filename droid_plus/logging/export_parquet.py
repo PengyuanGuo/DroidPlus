@@ -59,8 +59,10 @@ def export_episode(episode_dir: Path) -> Path:
     action_velocities: list[list[float]] = []
     episode_idx_col: list[int | None] = []
     instruction_col: list[str | None] = []
+    phase_index: list[int | None] = []
 
     for step in _iter_steps(steps_path):
+        phase_index.append(step.get("phase_index"))
         t_wall_s.append(float(step.get("t_wall_s", 0.0)))
         seq.append(int(step.get("seq", len(seq))))
 
@@ -78,6 +80,7 @@ def export_episode(episode_dir: Path) -> Path:
         {
             "t_wall_s": pa.array(t_wall_s, type=pa.float64()),
             "seq": pa.array(seq, type=pa.int64()),
+            "phase_index": pa.array(phase_index, type=pa.int64()),
             "state_positions": pa.array(state_positions, type=pa.list_(pa.float64())),
             "state_velocities": pa.array(state_velocities, type=pa.list_(pa.float64())),
             "action_positions": pa.array(action_positions, type=pa.list_(pa.float64())),

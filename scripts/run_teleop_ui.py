@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+# sorting--
 """
 Web UI teleop runner — browser interface for SO-101 teleop episodes.
 
@@ -51,6 +52,7 @@ from droid_plus.datagen import (
 from droid_plus.eval.episode_runner import EpisodeConfig, EpisodeResult
 from droid_plus.eval.experiment_setup import wait_for_cameras
 from droid_plus.logging import EpisodeRecorder
+from droid_plus.logging.phase_labels import PhaseSelector
 from droid_plus.robot import DroidPlus
 from droid_plus.utils import KeyPoller
 
@@ -89,6 +91,7 @@ class AppState:
     current_result: EpisodeResult | None = None
     current_config: EpisodeConfig | None = None
     status: str = "idle"  # "idle" | "running"
+    phases: PhaseSelector = field(default_factory=PhaseSelector)
     t_start: float = 0.0
     history: list[EpisodeHistory] = field(default_factory=list)
     lock: threading.Lock = field(default_factory=threading.Lock)
@@ -125,6 +128,7 @@ def _run_episode_thread(state: AppState) -> None:
             ee_frame=state.ee_frame,
             recorder=recorder,
             should_stop=state.stop_event.is_set,
+            get_phase=state.phases.get,
         )
 
         with state.lock:
@@ -317,6 +321,13 @@ LANDING_PAGE_HTML = """<!doctype html>
       </div>
     </div>
 
+    <div class="card">
+      <div class="card-label">Phase: <span id="current_phase">0</span></div>
+      <p>Starts at 0 each episode. Pause ~0.5 s at a boundary, select the phase, then continue.
+      Number keys 0–9 work when focus is outside a text field.</p>
+      <div id="phase_buttons"></div>
+      <span id="phase_error" role="alert"></span>
+    </div>
     <div class="status-area" id="status_area"></div>
 
     <div class="card">
@@ -408,6 +419,8 @@ LANDING_PAGE_HTML = """<!doctype html>
 
     function updateUI(s) {
       currentStatus = s.status;
+      document.getElementById("current_phase").textContent = s.phase_index;
+      document.querySelectorAll("#phase_buttons button").forEach(b => b.disabled = s.status !== "running");
       episodeIdxEl.textContent = s.episode_idx;
 
       if (s.status === "running") {
@@ -632,7 +645,34 @@ LANDING_PAGE_HTML = """<!doctype html>
       }
     });
 
+    async function selectPhase(phase) {
+      if (currentStatus !== "running") return;
+      const error = document.getElementById("phase_error");
+      try {
+        const r = await fetch("/episode/phase", {
+          method: "POST", headers: {"Content-Type": "application/json"},
+          body: JSON.stringify({phase_index: phase})
+        });
+        const result = await r.json();
+        if (!r.ok) throw new Error(result.detail || "Phase update failed");
+        document.getElementById("current_phase").textContent = result.phase_index;
+        error.textContent = "";
+      } catch(e) { error.textContent = e.message; }
+    }
+    for (let phase = 0; phase < 10; phase++) {
+      const button = document.createElement("button");
+      button.textContent = phase;
+      button.disabled = true;
+      button.onclick = () => selectPhase(phase);
+      document.getElementById("phase_buttons").appendChild(button);
+    }
+
     document.addEventListener("keydown", (e) => {
+      if (e.repeat || e.ctrlKey || e.metaKey || e.altKey) return;
+      if (/^[0-9]$/.test(e.key) && !e.target.matches("input, textarea, select, [contenteditable]")) {
+        e.preventDefault();
+        selectPhase(Number(e.key));
+      }
       if (e.key === "Escape") {
         e.preventDefault();
         stopEpisode();
@@ -700,6 +740,7 @@ def get_status():
     with s.lock:
         return {
             "status": s.status,
+            "phase_index": s.phases.get(),
             "episode_idx": s.episode_idx,
             "instruction": s.current_config.instruction if s.current_config else "",
             "t_start": s.t_start,
@@ -742,6 +783,7 @@ def episode_start(body: dict):
             action_step_limit=action_step_limit,
             experiment=experiment,
         )
+        s.phases = PhaseSelector()
         s.current_config = config
         s.status = "running"
         s.t_start = time.time()
@@ -753,6 +795,21 @@ def episode_start(body: dict):
         t.start()
 
     return {"ok": True, "episode_idx": s.episode_idx}
+
+
+@app.post("/episode/phase")
+def episode_phase(body: dict):
+    s = _state
+    if s is None:
+        raise HTTPException(500, "not initialized")
+    with s.lock:
+        if s.status != "running":
+            raise HTTPException(409, "no episode running")
+        try:
+            s.phases.set(body.get("phase_index"))
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+        return {"ok": True, "phase_index": s.phases.get()}
 
 
 @app.post("/episode/stop")
@@ -957,6 +1014,11 @@ def main() -> None:
                 if ch == "\x1b" and _state.status == "running":
                     print("\n[terminal] ESC → stopping episode...")
                     _state.stop_event.set()
+                if ch is not None and ch in "0123456789":
+                    with _state.lock:
+                        if _state.status == "running":
+                            _state.phases.set(int(ch))
+                            print(f"[phase] {ch}", flush=True)
                 if ch is None:
                     time.sleep(0.05)
     except KeyboardInterrupt:

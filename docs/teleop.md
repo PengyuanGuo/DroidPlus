@@ -207,3 +207,16 @@ SO-101 values clipped to conservative ranges before mapping (see table above).
 
 ### 9.19 development
 change relativefrankadynamic to make the joint streaming faster to reduce the control lag, the mapping for the 3rd, 4th joint on leader arm doesn't match the robot joint very well.
+
+## Phase labels during collection
+
+Both teleop entry points start every episode at phase 0. During recording, number
+keys 0–9 select the matching phase ID. In the web UI you can also click the phase
+buttons; keyboard shortcuts work outside text fields. Pause about 0.5 s at each
+boundary, select the next phase, then continue. Phase selection does not pause
+robot motion.
+
+Each recorded frame includes `phase_index`, preserved in LeRobot exports.
+Check `meta.json` → `phase_annotation` for sequence and short-phase review flags.
+See [real-data annotation](../README_real_data_annotation.md#4-phase-labels)
+for the collection protocol and training-format conversion requirements.

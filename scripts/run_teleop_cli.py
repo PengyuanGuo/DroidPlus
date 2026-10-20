@@ -44,6 +44,7 @@ from droid_plus.datagen import (
 from droid_plus.eval.episode_runner import EpisodeConfig
 from droid_plus.eval.experiment_setup import wait_for_cameras
 from droid_plus.logging import EpisodeRecorder
+from droid_plus.logging.phase_labels import PhaseSelector
 from droid_plus.robot import DroidPlus
 from droid_plus.utils import (
     KeyPoller,
@@ -58,7 +59,7 @@ _YELLOW = "\033[93m"
 _RESET = "\033[0m"
 
 
-def _make_cli_should_stop(keys: KeyPoller, stop_flag: list[bool]) -> Callable[[], bool]:
+def _make_cli_should_stop(keys: KeyPoller, stop_flag: list[bool], phases: PhaseSelector) -> Callable[[], bool]:
     """ESC (during episode) or Ctrl+C (via stop_flag) ends the episode."""
     def should_stop() -> bool:
         if stop_flag[0]:
@@ -67,6 +68,9 @@ def _make_cli_should_stop(keys: KeyPoller, stop_flag: list[bool]) -> Callable[[]
             ch = keys.poll_char()
             if ch == "\x1b":
                 return True
+            if ch is not None and ch in "0123456789":
+                phases.set(int(ch))
+                print(f"[phase] {phases.get()}", flush=True)
         return False
     return should_stop
 
@@ -277,7 +281,9 @@ def _episode_loop(
                 print(f"Recording episode {episode_idx} to {recorder.episode_dir}  "
                       f"(rate={session.record_rate_hz} Hz, cameras={record_cameras or 'none'})")
 
-            should_stop = _make_cli_should_stop(keys, stop_flag)
+            phases = PhaseSelector()
+            print("[phase] Starting at 0. Keys 0–9 select phase IDs; pause ~0.5 s, press, then continue.")
+            should_stop = _make_cli_should_stop(keys, stop_flag, phases)
             result = run_teleop_episode(
                 config=config,
                 session=session,
@@ -289,6 +295,7 @@ def _episode_loop(
                 ee_frame=ee_frame,
                 recorder=recorder,
                 should_stop=should_stop,
+                get_phase=phases.get,
             )
 
             duration = result.t_end - result.t_start

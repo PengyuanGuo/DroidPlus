@@ -7,8 +7,13 @@ most of its logic transfers, but some parts must be adapted. Each section marks 
 
 Dependency: `atomic_policy/vlm/grounder_molmo.py` (MolmoPoint wrapper).
 
----
+For the real sorting recordings in `output_1017_phase_sorting`, use
+[`scripts/annotate_sorting_points.py`](scripts/annotate_sorting_points.py) to
+annotate JPEG images directly before zarr conversion. See the
+[setup and commands](docs/sorting-point-annotation.md).
 
+---
+nda_tabletop_10hz_annotated.zar
 ## 1. Target format (what training expects)
 
 The sim reference dataset (`panda_tabletop_10hz_annotated.zarr`: 2000 episodes, 1.28 M frames,
@@ -70,7 +75,7 @@ right (RGB, not BGR); `state[:, 7]` ≈ 1 when the hand is open; `action[t, :7]`
 
 | Missing | Fix |
 |---|---|
-| `phase_index` column (operator keypress during teleop) | add to the collection loop — Section 4 |
+| `phase_index` column (operator keypress during teleop) | implemented in teleop CLI/UI and LeRobot export — Section 4 |
 | `phase_prompt` | lookup from `phase_label` — Section 6 |
 | `point_pixel` | Section 5 |
 | Absolute joint-target actions | check what the `action` column holds (velocities won't work); use logged absolute targets if present, else `action[t, :7] = joint_pos[t+1]` |
@@ -88,7 +93,61 @@ phase boundaries from the keypress (Section 4) rather than from the gripper sign
 
 Phases are labelled **by the operator during teleoperation**, not inferred afterwards.
 
-### Collection side **[new]**
+### Collection side **[implemented in this repository]**
+
+Both `scripts/run_teleop_cli.py` and `scripts/run_teleop_ui.py` now record operator
+phase labels. For example, from the repository root with your camera environment
+variables exported:
+
+```bash
+python scripts/run_teleop_cli.py --gripper franka --task "your_task"
+# Or use the browser UI:
+python scripts/run_teleop_ui.py --gripper franka --task "your_task"
+```
+
+- Each episode starts at **phase 0**. Keys **0–9 set the matching zero-based ID**:
+  press `1` to begin phase 1, `2` for phase 2, etc. Repeating the current ID is harmless.
+  Choose the task's phase definitions before collection.
+- CLI: focus the terminal; SPACE starts recording, ESC ends it.
+- Web UI: click phase buttons or use number keys outside input fields. The displayed
+  phase confirms the selection. Terminal number keys also work while an episode runs.
+  The API `POST /episode/phase` accepts `{"phase_index": 10}` for IDs through 127.
+- Pause about 0.5 s at each visually verifiable boundary, select the phase, confirm
+  it, then continue. This is an operator pause; selecting a phase does not stop the robot.
+- Every saved `steps.jsonl` row contains integer `phase_index`. A phase selection is
+  sampled before camera acquisition and applies to that recorded frame and later
+  frames until changed. A selection received during acquisition applies on the next step.
+- `meta.json` contains `phase_annotation`: segment lengths, issues, and
+  `needs_review`. Finalization prints warnings for a nonzero first phase,
+  skipped/backward transitions, empty recordings, and segments shorter than 0.5 s
+  at the configured recording cadence. Review flagged episodes before training.
+  The code does not know your task's final phase, so also check that all expected
+  phases were completed.
+- The control loop rounds recording intervals to whole control steps:
+  100 Hz control / requested 15 Hz records every 7 steps (nominal 14.286 Hz).
+  Metadata stores that nominal rate plus `requested_record_rate_hz`; wall timestamps
+  remain available for checking actual cadence.
+
+Export normally; the LeRobot v2.1 Parquet files and `meta/info.json` preserve
+`phase_index` as int64:
+
+```bash
+python scripts/export_lerobot.py output/<run> --out-dir output/lerobot/<run>
+```
+
+Old episodes with no labels export as `phase_index = -1`, never as phase 0.
+Partially labelled episodes raise an export error. The standalone steps-to-Parquet
+export also preserves the column (null for old unlabelled rows). During zarr
+conversion copy the column to `data/phase_label` after rejecting unlabelled data.
+
+Collection keeps DROID's native gripper convention: **0=open, 1=closed** for both
+the observed fraction and command. The converter must use
+`state[:, 7] = 1 - observation.state[:, 7]` and
+`action[:, 7] = 1 - action[:, 7]` for the Franka Hand to meet Section 1.
+The arm action already contains absolute commanded joint targets.
+This collection change does not implement the zarr converter or Molmo annotation.
+
+The collection protocol is:
 
 - The teleop loop keeps a `current_phase` integer, starting at 0. A keypress (`1`, `2`, `3`, …)
   sets it to that phase id; the operator presses the next number as each phase begins.
@@ -168,7 +227,7 @@ Both are per-phase lookup tables **[existing structure, adapt content]**:
 | `_encode_prompt` | reuse as is |
 | Prompt tables, `_parse_object_label` | **adapt** to the task |
 | Gripper segmentation (`_detect_gripper_transitions` … `_segment_episode`, `alpha/beta/gamma`) | **delete** — replaced by the operator keypress label |
-| `phase_index` column → `phase_label`, sequence validation, review queue | **new** |
+| Per-frame `phase_index`, sequence validation and review flags | implemented in collection/export; copy to `phase_label` during conversion |
 | Point sampling / voting / outlier rejection | reuse; **change** sampling window and image source |
 | Zarr read/write loop (`annotate_zarr`) | reuse; read from the converted zarr |
 | LeRobot → zarr converter | **new** |

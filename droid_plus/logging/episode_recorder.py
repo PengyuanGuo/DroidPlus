@@ -91,6 +91,7 @@ class EpisodeRecorder:
         self._t_start = time.time()
         self._step_count = 0
         self._closed = False
+        self.phase_labels: list[int] = []
 
     def record_step(
         self,
@@ -105,6 +106,7 @@ class EpisodeRecorder:
         action_velocities: list[float] | np.ndarray,
         t_wall_s: float | None = None,
         extra: dict[str, Any] | None = None,
+        phase_index: int | None = None,
     ) -> dict[str, str]:
         """
         Record a single step (images + state/action data).
@@ -119,6 +121,7 @@ class EpisodeRecorder:
             action_positions: Commanded action positions (8,)
             action_velocities: Commanded action velocities (8,)
             t_wall_s: Wall clock time (defaults to now)
+            phase_index: Optional zero-based operator phase label (0–127).
             extra: Additional fields to include in step data
 
         Returns:
@@ -127,6 +130,8 @@ class EpisodeRecorder:
         if self._closed:
             raise RuntimeError("EpisodeRecorder is closed")
 
+        if phase_index is not None and (type(phase_index) is not int or not 0 <= phase_index <= 127):
+            raise ValueError("phase_index must be an integer in [0, 127]")
         t_wall_s = t_wall_s or time.time()
         image_paths: dict[str, str] = {}
 
@@ -162,7 +167,11 @@ class EpisodeRecorder:
         if extra:
             step_data.update(extra)
 
+        if phase_index is not None:
+            step_data["phase_index"] = phase_index
         self._data_writer.append(step_data)
+        if phase_index is not None:
+            self.phase_labels.append(phase_index)
         self._step_count += 1
 
         return image_paths
@@ -251,6 +260,8 @@ class EpisodeRecorder:
             },
         }
 
+        if self.phase_labels:
+            meta["schema"]["steps_jsonl"]["phase_index"] = "int (zero-based operator phase)"
         if extra_meta:
             meta.update(extra_meta)
 

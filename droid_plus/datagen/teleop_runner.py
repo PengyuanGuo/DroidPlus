@@ -25,6 +25,7 @@ from droid_plus.datagen.so101 import (
 )
 from droid_plus.eval.episode_runner import EpisodeConfig, EpisodeResult
 from droid_plus.logging import EpisodeRecorder
+from droid_plus.logging.phase_labels import review_phase_labels
 from droid_plus.robot.observations import pack_state_action
 from droid_plus.services.franky_client import HOME_POSITION
 
@@ -66,6 +67,7 @@ def run_teleop_episode(
     ee_frame: str,
     recorder: EpisodeRecorder | None,
     should_stop: Callable[[], bool],
+    get_phase: Callable[[], int] | None = None,
 ) -> EpisodeResult:
     """Run a single teleop episode.
 
@@ -98,6 +100,8 @@ def run_teleop_episode(
                 break
 
             t0 = time.time()
+            # Snapshot before image acquisition so an input during IO applies next step.
+            phase_index = get_phase() if get_phase is not None else 0
 
             action = teleop.get_action()
             so_deg = action_to_so101_joints_deg(action)
@@ -176,6 +180,7 @@ def run_teleop_episode(
                         action_positions=action_pos,
                         action_velocities=action_vel,
                         t_wall_s=t0,
+                        phase_index=phase_index,
                     )
                     rec_seq += 1
                 except Exception as e:
@@ -224,6 +229,12 @@ def finalize_teleop_episode_recording(
     """
     if result.recorder is None:
         return
+    effective_rate = session.rate_hz / max(1, round(session.rate_hz / session.record_rate_hz))
+    phase_review = review_phase_labels(
+        result.recorder.phase_labels, min_frames=max(1, int(np.ceil(0.5 * effective_rate))),
+    )
+    for issue in phase_review["issues"]:
+        print(f"[phase] REVIEW: {issue}")
     try:
         result.recorder.finalize(
             experiment=config.experiment,
@@ -233,11 +244,13 @@ def finalize_teleop_episode_recording(
             policy_info={"name": session.policy_name},
             control_info={
                 "rate_hz": session.rate_hz,
-                "record_rate_hz": session.record_rate_hz,
+                "record_rate_hz": effective_rate,
+                "requested_record_rate_hz": session.record_rate_hz,
                 "min_z": session.min_z,
                 "action_step_limit": config.action_step_limit,
             },
             extra_meta={
+                "phase_annotation": phase_review,
                 "valid": episode_valid,
                 "success": episode_success,
                 "score": episode_score,

@@ -235,3 +235,8 @@ experiments/
 openpi_config/
 pi05_droid_jointpos_droidplus_finetune/
 pi05_droid_jointpos_droidplus_lora/
+
+atomic_policy-main/
+backups/
+*.zip
+*.whl
