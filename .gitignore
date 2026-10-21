@@ -240,3 +240,6 @@ atomic_policy-main/
 backups/
 *.zip
 *.whl
+
+data/
+reports/

@@ -54,6 +54,14 @@ right (RGB, not BGR); `state[:, 7]` ≈ 1 when the hand is open; `action[t, :7]`
 
 ## 2. LeRobot → zarr conversion **[new]**
 
+**Implemented native-data path:** for the corrected JSONL/JPEG sorting data, use
+[`scripts/convert_droidplus_to_zarr.py`](scripts/convert_droidplus_to_zarr.py).
+It reads `steps_molmo.jsonl`, transforms full-image points into the saved square
+crop, writes zarr v2, and also writes the CHW image cache required by the
+MolmoSpaces two-phase dataset loader. See
+[conversion commands and conventions](docs/sorting-zarr-conversion.md).
+The LeRobot steps below describe the alternative Parquet/video input route.
+
 1. Read `meta/info.json`: `fps`, `codebase_version` (v2.1 = one parquet per episode, v3.0 =
    merged files; layouts differ) and `features` (find the front camera, wrist camera,
    joint positions, gripper and action keys).
@@ -145,7 +153,8 @@ the observed fraction and command. The converter must use
 `state[:, 7] = 1 - observation.state[:, 7]` and
 `action[:, 7] = 1 - action[:, 7]` for the Franka Hand to meet Section 1.
 The arm action already contains absolute commanded joint targets.
-This collection change does not implement the zarr converter or Molmo annotation.
+The native-data annotation and conversion scripts are linked above; the
+Parquet/video conversion route remains separate.
 
 The collection protocol is:
 
