@@ -82,6 +82,7 @@ def run_teleop_episode(
     seq = 0
     rec_seq = 0
     last_gripper_cmd: float = 0.0
+    gripper_command_sent = False
     q_prev_safe = np.array(HOME_POSITION, dtype=float)
 
     step_limit = config.action_step_limit if config.action_step_limit > 0 else None
@@ -119,17 +120,19 @@ def run_teleop_episode(
             # Gripper — same binary open/close as policy rollout.
             gripper_cmd_frac = last_gripper_cmd
             if gripper_initialized and not session.dry_run:
-                so101_gripper_deg = extract_so101_gripper_deg(action)
-                if so101_gripper_deg is not None:
-                    # 0° = closed, 90° = open. Midpoint 45° matches policy threshold 0.5.
-                    gripper_cmd_frac = 1.0 if float(so101_gripper_deg) <= 45.0 else 0.0
-                    if gripper_cmd_frac != last_gripper_cmd:
+                gripper_percent = extract_so101_gripper_deg(action)
+                if gripper_percent is not None:
+                    # LeRobot normalizes the gripper to 0–100, even when arm
+                    # joints use degrees: 0 = closed, 100 = open.
+                    gripper_cmd_frac = 1.0 if float(gripper_percent) <= 50.0 else 0.0
+                    if not gripper_command_sent or gripper_cmd_frac != last_gripper_cmd:
                         try:
                             if gripper_cmd_frac >= 0.5:
                                 droid.gripper.close_async(wait=False)
                             else:
                                 droid.gripper.open_async(wait=False)
                             last_gripper_cmd = gripper_cmd_frac
+                            gripper_command_sent = True
                         except Exception:
                             gripper_cmd_frac = last_gripper_cmd
 

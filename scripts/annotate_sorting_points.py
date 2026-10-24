@@ -20,6 +20,17 @@ PROJECT = Path(__file__).resolve().parents[1]
 
 
 def pointing_prompts(phase: int, text: str) -> tuple[str, str]:
+    # Four-phase collection prompts omit the destination; use this dataset's
+    # sorting rule, never infer a destination from the object's current position.
+    prefixes = {0: "pre-grasp", 1: "grasp", 2: "pre-place", 3: "place"}
+    if phase in prefixes:
+        match = re.fullmatch(rf"{prefixes[phase]} (banana|orange|apple|salt bottle)", text)
+        if match:
+            obj = match[1]
+            if phase < 2:
+                return f"Point to the {obj} on the table", f"Point to the {obj}"
+            color = "white" if obj == "salt bottle" else "blue"
+            return f"Point to the inside of the {color} bin", f"Point to the {color} bin"
     if phase == 0:
         match = re.fullmatch(r"grasp (banana|orange|apple|salt bottle)", text)
         if match:
@@ -49,7 +60,7 @@ def read_episode(path: Path) -> tuple[list[dict], list[dict]]:
             raise ValueError(f"{path}:{number}: expected a frame object")
         phase = row.get("phase_index")
         prompt = row.get("phase_prompt")
-        if type(phase) is not int or phase not in (0, 1) or not isinstance(prompt, str):
+        if type(phase) is not int or phase not in (0, 1, 2, 3) or not isinstance(prompt, str):
             raise ValueError(f"{path}:{number}: missing/invalid phase_index or phase_prompt")
         primary, fallback = pointing_prompts(phase, prompt)
         if not segments or segments[-1]["phase_index"] != phase:
@@ -65,6 +76,17 @@ def read_episode(path: Path) -> tuple[list[dict], list[dict]]:
         if not isinstance(relative, str) or not (path.parent / relative).is_file():
             raise ValueError(f"{path}:{number}: missing left-camera image {relative!r}")
         rows.append(row)
+    four_phase = bool(segments and segments[0]["phase_prompt"].startswith("pre-grasp "))
+    if four_phase:
+        labels = [segment["phase_index"] for segment in segments]
+        if len(labels) % 4 or labels != [0, 1, 2, 3] * (len(labels) // 4):
+            raise ValueError(f"{path}: expected complete four-phase cycles 0,1,2,3")
+        for start in range(0, len(segments), 4):
+            obj = segments[start]["phase_prompt"].removeprefix("pre-grasp ")
+            expected = [f"{prefix} {obj}" for prefix in ("pre-grasp", "grasp", "pre-place", "place")]
+            if [s["phase_prompt"] for s in segments[start:start + 4]] != expected:
+                raise ValueError(f"{path}: four-phase object/prompt mismatch")
+        return rows, segments
     if [segment["phase_index"] for segment in segments] != [0, 1, 0, 1, 0, 1]:
         raise ValueError(f"{path}: expected six consecutive phase segments 0,1,0,1,0,1")
     for grasp, place in zip(segments[::2], segments[1::2]):

@@ -323,8 +323,10 @@ LANDING_PAGE_HTML = """<!doctype html>
 
     <div class="card">
       <div class="card-label">Phase: <span id="current_phase">0</span></div>
-      <p>Starts at 0 each episode. Pause ~0.5 s at a boundary, select the phase, then continue.
-      Number keys 0–9 work when focus is outside a text field.</p>
+      <p>Starts at 0 (pre-grasp) each episode. Pause ~0.5 s at a boundary,
+      select the phase, then continue. Number keys 0–3 work when focus is outside a text field.
+      Select 0 again for the next item. Each step saves phase_index and an empty
+      phase_prompt for annotation after collection.</p>
       <div id="phase_buttons"></div>
       <span id="phase_error" role="alert"></span>
     </div>
@@ -419,7 +421,7 @@ LANDING_PAGE_HTML = """<!doctype html>
 
     function updateUI(s) {
       currentStatus = s.status;
-      document.getElementById("current_phase").textContent = s.phase_index;
+      document.getElementById("current_phase").textContent = phaseLabel(s.phase_index);
       document.querySelectorAll("#phase_buttons button").forEach(b => b.disabled = s.status !== "running");
       episodeIdxEl.textContent = s.episode_idx;
 
@@ -645,6 +647,9 @@ LANDING_PAGE_HTML = """<!doctype html>
       }
     });
 
+    const phaseNames = ["pre-grasp", "grasp", "pre-place", "place"];
+    function phaseLabel(phase) { return `${phase}: ${phaseNames[phase]}`; }
+
     async function selectPhase(phase) {
       if (currentStatus !== "running") return;
       const error = document.getElementById("phase_error");
@@ -655,13 +660,13 @@ LANDING_PAGE_HTML = """<!doctype html>
         });
         const result = await r.json();
         if (!r.ok) throw new Error(result.detail || "Phase update failed");
-        document.getElementById("current_phase").textContent = result.phase_index;
+        document.getElementById("current_phase").textContent = phaseLabel(result.phase_index);
         error.textContent = "";
       } catch(e) { error.textContent = e.message; }
     }
-    for (let phase = 0; phase < 10; phase++) {
+    for (let phase = 0; phase < phaseNames.length; phase++) {
       const button = document.createElement("button");
-      button.textContent = phase;
+      button.textContent = phaseLabel(phase);
       button.disabled = true;
       button.onclick = () => selectPhase(phase);
       document.getElementById("phase_buttons").appendChild(button);
@@ -669,7 +674,7 @@ LANDING_PAGE_HTML = """<!doctype html>
 
     document.addEventListener("keydown", (e) => {
       if (e.repeat || e.ctrlKey || e.metaKey || e.altKey) return;
-      if (/^[0-9]$/.test(e.key) && !e.target.matches("input, textarea, select, [contenteditable]")) {
+      if (/^[0-3]$/.test(e.key) && !e.target.matches("input, textarea, select, [contenteditable]")) {
         e.preventDefault();
         selectPhase(Number(e.key));
       }
@@ -806,7 +811,10 @@ def episode_phase(body: dict):
         if s.status != "running":
             raise HTTPException(409, "no episode running")
         try:
-            s.phases.set(body.get("phase_index"))
+            phase = body.get("phase_index")
+            if type(phase) is not int or not 0 <= phase <= 3:
+                raise ValueError("phase_index must be an integer in [0, 3]")
+            s.phases.set(phase)
         except ValueError as e:
             raise HTTPException(400, str(e))
         return {"ok": True, "phase_index": s.phases.get()}
@@ -998,7 +1006,8 @@ def main() -> None:
     print(f"    Record rate:   {session.record_rate_hz} Hz")
     print(f"    Record:        {base_run_dir or 'disabled'}")
     print(f"    Dry run:       {session.dry_run}")
-    print("\n  Terminal: ESC to stop episode, Ctrl+C to quit.\n")
+    print("\n  Phases: 0=pre-grasp, 1=grasp, 2=pre-place, 3=place.")
+    print("  Terminal: 0–3 to select phase, ESC to stop episode, Ctrl+C to quit.\n")
 
     server_thread = threading.Thread(
         target=uvicorn.run,
@@ -1014,7 +1023,7 @@ def main() -> None:
                 if ch == "\x1b" and _state.status == "running":
                     print("\n[terminal] ESC → stopping episode...")
                     _state.stop_event.set()
-                if ch is not None and ch in "0123456789":
+                if ch is not None and ch in "0123":
                     with _state.lock:
                         if _state.status == "running":
                             _state.phases.set(int(ch))

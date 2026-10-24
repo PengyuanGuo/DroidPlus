@@ -210,13 +210,19 @@ change relativefrankadynamic to make the joint streaming faster to reduce the co
 
 ## Phase labels during collection
 
-Both teleop entry points start every episode at phase 0. During recording, number
-keys 0–9 select the matching phase ID. In the web UI you can also click the phase
-buttons; keyboard shortcuts work outside text fields. Pause about 0.5 s at each
+Both teleop entry points start every episode at phase 0. In the web UI, use number
+keys or buttons: **0 = pre-grasp, 1 = grasp, 2 = pre-place, 3 = place**.
+Select 0 again when starting the next item. Browser keyboard shortcuts work outside
+text fields; the terminal also accepts 0–3. The CLI accepts phase IDs 0–9.
+Pause about 0.5 s at each
 boundary, select the next phase, then continue. Phase selection does not pause
 robot motion.
 
-Each recorded frame includes `phase_index`, preserved in LeRobot exports.
+Each line in `episode_NNN/steps.jsonl` ends with `"phase_index": 0, "phase_prompt": ""`
+(with the selected index). Fill in `phase_prompt` after collection once the actual
+item order is known. `phase_index` is also preserved in LeRobot exports.
 Check `meta.json` → `phase_annotation` for sequence and short-phase review flags.
+The sequence review currently expects increasing phase IDs, so a deliberate
+3 → 0 transition between items will be flagged for review; labels are saved as selected.
 See [real-data annotation](../README_real_data_annotation.md#4-phase-labels)
 for the collection protocol and training-format conversion requirements.

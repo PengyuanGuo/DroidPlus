@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+from pathlib import Path
 import threading
 import time
 from dataclasses import dataclass, field, replace
@@ -66,6 +67,7 @@ class AppState:
     session: SessionConfig
     open_loop_horizon: int
     base_run_dir: str | None
+    diffusion_policy_path: str | None = None
     # Lazy-init per canonical policy name; evicted on override.
     policy_clients: dict[str, Any] = field(default_factory=dict)
     # Per-policy host/port/display-name overrides for POLICIES entries (session-scoped).
@@ -87,6 +89,8 @@ class AppState:
 
 def _effective_host_port(state: AppState, policy_name: str) -> tuple[str, int]:
     """Return host/port for a policy, checking overrides, POLICIES, then custom_policies."""
+    if policy_name == "diffusion" and state.diffusion_policy_path:
+        return "local", 0
     host: Any = None
     port: Any = None
     if policy_name in POLICIES:
@@ -104,6 +108,8 @@ def _effective_host_port(state: AppState, policy_name: str) -> tuple[str, int]:
 
 
 def _display_name(state: AppState, policy_name: str) -> str:
+    if policy_name == "diffusion" and state.diffusion_policy_path:
+        return f"diffusion ({Path(state.diffusion_policy_path).name})"
     if policy_name in POLICIES:
         return state.policy_overrides.get(policy_name, {}).get("display_name") or policy_name
     if policy_name in state.custom_policies:
@@ -112,6 +118,8 @@ def _display_name(state: AppState, policy_name: str) -> str:
 
 
 def _policy_exists(state: AppState, policy_name: str) -> bool:
+    if policy_name == "diffusion" and state.diffusion_policy_path:
+        return True
     return policy_name in POLICIES or policy_name in state.custom_policies
 
 
@@ -119,6 +127,11 @@ def _get_or_create_policy(state: AppState, policy_name: str) -> Any:
     """Get or lazily create a policy client for the given policy name."""
     if policy_name in state.policy_clients:
         return state.policy_clients[policy_name]
+    if policy_name == "diffusion" and state.diffusion_policy_path:
+        from droid_plus.policies.diffusion_droid import DiffusionDroidClient
+        client = DiffusionDroidClient(state.diffusion_policy_path)
+        state.policy_clients[policy_name] = client
+        return client
     host, port = _effective_host_port(state, policy_name)
     client = build_policy_client(host, port, state.open_loop_horizon)
     state.policy_clients[policy_name] = client
@@ -932,7 +945,12 @@ def get_policies():
             "display_name": _display_name(s, name),
             "is_custom": True,
         })
-    return {"policies": policies, "default": DEFAULT_POLICY}
+    if s.diffusion_policy_path and not any(p["name"] == "diffusion" for p in policies):
+        policies.append({
+            "name": "diffusion", "host": "local", "port": 0,
+            "display_name": _display_name(s, "diffusion"), "is_custom": False,
+        })
+    return {"policies": policies, "default": s.session.policy_name}
 
 
 @app.post("/policies/add")
@@ -976,6 +994,8 @@ def policies_override(body: dict):
     if s is None:
         raise HTTPException(500, "not initialized")
     name = body.get("name")
+    if name == "diffusion" and s.diffusion_policy_path:
+        raise HTTPException(400, "Local diffusion checkpoint: restart with --policy-path to change it")
     if not name or name not in POLICIES:
         raise HTTPException(400, f"unknown policy: {name}")
     with s.lock:
@@ -1036,7 +1056,7 @@ def episode_start(body: dict):
         raise HTTPException(500, "not initialized")
 
     instruction = (body.get("instruction") or "").strip()
-    policy_name = body.get("policy") or DEFAULT_POLICY
+    policy_name = body.get("policy") or s.session.policy_name
     experiment = (body.get("experiment") or "").strip() or None
     task = (body.get("task") or "").strip()
     try:
@@ -1153,6 +1173,8 @@ def main() -> None:
     p = argparse.ArgumentParser(description="Web UI for running policy experiments")
     p.add_argument("--port", type=int, default=DEFAULT_PORT, help=f"Web server port (default: {DEFAULT_PORT})")
     p.add_argument("--policy", default=DEFAULT_POLICY, help=f"Default policy (available: {', '.join(POLICIES.keys())})")
+    p.add_argument("--policy-path", type=Path,
+        help="Local LeRobot diffusion checkpoint directory; required for --policy diffusion")
     p.add_argument("--open-loop-horizon", type=int, default=10, help="Policy chunk horizon")
     p.add_argument("--rate-hz", type=float, default=15.0, help="Control loop rate (Hz)")
     p.add_argument("--jpeg-quality", type=int, default=90, help="JPEG quality for camera snapshots")
@@ -1163,6 +1185,15 @@ def main() -> None:
     p.add_argument("--output-dir", default="output",
         help="Base output directory for recordings")
     args = p.parse_args()
+    if args.policy == "diffusion" and args.policy_path is None:
+        p.error("--policy diffusion requires --policy-path pointing to a checkpoint directory")
+    if args.policy_path is not None:
+        args.policy_path = args.policy_path.expanduser().resolve()
+        config_path = args.policy_path / "config.json"
+        if not config_path.is_file() or not (args.policy_path / "model.safetensors").is_file():
+            p.error("--policy-path must contain config.json and model.safetensors (choose dp_050000, not dp_ckpts)")
+        if json.loads(config_path.read_text()).get("type") != "diffusion":
+            p.error("--policy-path must be a LeRobot diffusion checkpoint")
 
     record_jpeg_quality = args.record_jpeg_quality
 
@@ -1192,6 +1223,7 @@ def main() -> None:
         session=session,
         open_loop_horizon=int(args.open_loop_horizon),
         base_run_dir=base_run_dir,
+        diffusion_policy_path=str(args.policy_path) if args.policy_path else None,
         current_policy=args.policy,
     )
 

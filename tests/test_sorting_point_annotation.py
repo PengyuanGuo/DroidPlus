@@ -106,6 +106,25 @@ class SortingPointAnnotationTests(unittest.TestCase):
         self.assertEqual(sample_indices(100, 200, 5, 2), [102, 107, 113, 118, 124])
         self.assertEqual(sample_indices(10, 11, 5, 2), [10])
 
+    def test_four_phase_targets_and_incomplete_cycle(self):
+        rows = []
+        for obj in ("banana", "salt bottle"):
+            for phase, prefix in enumerate(("pre-grasp", "grasp", "pre-place", "place")):
+                rows.append({"seq": len(rows), "phase_index": phase,
+                             "phase_prompt": f"{prefix} {obj}",
+                             "images": {"left": "left/000000000.jpg"}})
+        self.path.write_text("".join(json.dumps(r) + "\n" for r in rows))
+        _, segments = read_episode(self.path)
+        self.assertEqual(len(segments), 8)
+        self.assertIn("banana on the table", segments[1]["molmo_prompt"])
+        for index in (2, 3):
+            self.assertIn("inside of the blue bin", segments[index]["molmo_prompt"])
+        for index in (6, 7):
+            self.assertIn("inside of the white bin", segments[index]["molmo_prompt"])
+        self.path.write_text("".join(json.dumps(r) + "\n" for r in rows[:-1]))
+        with self.assertRaisesRegex(ValueError, "complete four-phase cycles"):
+            read_episode(self.path)
+
 
 if __name__ == "__main__":
     unittest.main()

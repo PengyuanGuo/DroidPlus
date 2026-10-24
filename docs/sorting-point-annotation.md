@@ -3,7 +3,48 @@
 Run from the **DroidPlus** directory. No LeRobot export or zarr conversion is
 needed for this step. `scripts/annotate_sorting_points.py` reads `steps.jsonl`
 and the left-camera JPEGs directly, using the existing `phase_index` and
-`phase_prompt` fields. It expects six consecutive segments: 0,1,0,1,0,1.
+`phase_prompt` fields. It accepts either six two-phase segments (0,1,0,1,0,1)
+or complete four-phase cycles (0,1,2,3 repeated for each object).
+
+## Four-phase recordings
+
+Four-phase mode is detected from the initial `pre-grasp OBJECT` prompt. Use
+exact prompts `pre-grasp OBJECT`, `grasp OBJECT`, `pre-place OBJECT`, and
+`place OBJECT`, with labels 0, 1, 2, 3 respectively. Supported object names are
+`banana`, `orange`, `apple`, and `salt bottle`. Phases 0/1 point to the object;
+phases 2/3 point to the bin. The rule is **fruit to blue, salt bottle to white**;
+change the prompt mapping before annotating a different sorting rule.
+
+Using the existing environment, replace the dataset path below with the new
+recording folder containing synchronized camera files:
+
+```bash
+cd /home/atomic/Project/DroidPlus
+source .venv-molmo/bin/activate
+export DATASET=/home/atomic/Project/DroidPlus/output_NEW_4phase_sorting
+export ATOMIC_POLICY_ROOT=/home/atomic/Project/atomic_policy
+
+python scripts/annotate_sorting_points.py --dataset-root "$DATASET" \
+  --atomic-policy-root "$ATOMIC_POLICY_ROOT" --full-frame --dry-run
+
+python scripts/annotate_sorting_points.py --dataset-root "$DATASET" \
+  --atomic-policy-root "$ATOMIC_POLICY_ROOT" --full-frame \
+  --max-episodes 1 --device cuda:0
+
+# After reviewing the first episode's previews, regenerate and process all:
+python scripts/annotate_sorting_points.py --dataset-root "$DATASET" \
+  --atomic-policy-root "$ATOMIC_POLICY_ROOT" --full-frame \
+  --device cuda:0 --overwrite
+```
+
+`--overwrite` replaces generated labels/previews, including any manual corrections;
+use it here only to regenerate the initial trial along with the whole collection.
+Three objects produce twelve previews, `segment_00.jpg` through `segment_11.jpg`.
+Review object points for phases 0/1 and bin points for phases 2/3. The original
+recordings stay unchanged. Full-frame annotations must be mapped into the eventual
+training crop by the converter; alternatively replace `--full-frame` consistently
+with a verified `--roi X Y SIZE`. Never assume a crop fits new camera placement.
+The existing zarr converter still needs four-phase support before conversion.
 
 ## Environment
 

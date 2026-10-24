@@ -66,7 +66,11 @@ def so101_to_franka(so101_joints_rad: np.ndarray) -> np.ndarray:
 
 
 def extract_so101_gripper_deg(action: dict[str, Any]) -> float | None:
-    """Extract SO-101 gripper angle (deg) from an action dict, or ``None``."""
+    """Extract LeRobot's gripper value (0–100), or ``None``.
+
+    The historical function name is retained for callers; the gripper motor
+    uses RANGE_0_100 independently of the arm's degree setting.
+    """
     for key in SO101_GRIPPER_KEYS:
         if key in action:
             return float(action[key])

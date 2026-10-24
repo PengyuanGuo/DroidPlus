@@ -122,6 +122,8 @@ class EpisodeRecorder:
             action_velocities: Commanded action velocities (8,)
             t_wall_s: Wall clock time (defaults to now)
             phase_index: Optional zero-based operator phase label (0–127).
+                Labelled steps end with phase_index and phase_prompt; the prompt
+                defaults to an empty string for annotation after collection.
             extra: Additional fields to include in step data
 
         Returns:
@@ -169,6 +171,7 @@ class EpisodeRecorder:
 
         if phase_index is not None:
             step_data["phase_index"] = phase_index
+            step_data["phase_prompt"] = step_data.pop("phase_prompt", "")
         self._data_writer.append(step_data)
         if phase_index is not None:
             self.phase_labels.append(phase_index)
@@ -262,6 +265,7 @@ class EpisodeRecorder:
 
         if self.phase_labels:
             meta["schema"]["steps_jsonl"]["phase_index"] = "int (zero-based operator phase)"
+            meta["schema"]["steps_jsonl"]["phase_prompt"] = "str (empty until annotated after collection)"
         if extra_meta:
             meta.update(extra_meta)
 

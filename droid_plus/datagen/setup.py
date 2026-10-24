@@ -59,14 +59,17 @@ def init_gripper(droid: "DroidPlus", *, backend: str = "robotiq") -> bool:
             )
             print("Connecting to Franka Hand via franky_service...")
         conn = droid.connect_gripper()
-        if backend == "franka" and not conn.get("connected", True):
+        if not conn.get("connected", True):
             raise RuntimeError(
-                f"Franka Hand not connected on franky_service: {conn}. "
-                "Redeploy franky_service on the NUC with FRANKA_GRIPPER=1."
+                f"Gripper connection failed (backend={backend}): {conn}. "
+                + ("Run franky_service on the NUC with FRANKA_GRIPPER=1."
+                   if backend == "franka" else "Check the workstation gripper_service and USB connection.")
             )
         if backend == "franka":
             print("Homing Franka Hand (often 10–30s, please wait)...")
-        droid.activate_gripper()
+        activation = droid.activate_gripper()
+        if activation.get("ok") is False or activation.get("is_activated") is False:
+            raise RuntimeError(f"Gripper activation failed: {activation}")
         print("Gripper initialized successfully")
         return True
     except Exception as e:

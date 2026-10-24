@@ -28,10 +28,44 @@ from droid_plus.logging.lerobot_export import (
     _write_episode_parquet,
 )
 from droid_plus.logging.phase_labels import PhaseSelector, review_phase_labels
+from droid_plus.datagen.setup import init_gripper
 from scripts.run_teleop_cli import _make_cli_should_stop
 
 
 class PhaseCollectionTests(unittest.TestCase):
+    def test_gripper_normalized_range_and_initial_command(self):
+        droid = Mock()
+        teleop = Mock()
+        teleop.get_action.side_effect = [{"gripper.pos": value} for value in [100, 49, 51, 51]]
+        with patch("droid_plus.datagen.teleop_runner.action_to_so101_joints_deg", return_value=np.zeros(6)), \
+             patch("droid_plus.datagen.teleop_runner.so101_to_franka", return_value=np.zeros(7)), \
+             patch("droid_plus.datagen.teleop_runner.enforce_min_z", return_value=(np.zeros(7), False)):
+            run_teleop_episode(
+                config=EpisodeConfig(action_step_limit=4),
+                session=TeleopSessionConfig(rate_hz=1000, record=False),
+                droid=droid, teleop=teleop, gripper_initialized=True,
+                pin_model=None, pin_data=None, ee_frame="", recorder=None,
+                should_stop=lambda: False,
+            )
+        self.assertEqual(droid.gripper.method_calls, [
+            unittest.mock.call.open_async(wait=False),
+            unittest.mock.call.close_async(wait=False),
+            unittest.mock.call.open_async(wait=False),
+        ])
+
+    def test_gripper_init_rejects_failed_activation(self):
+        droid = Mock()
+        droid.gripper.timeout_s = 5.0
+        droid.gripper.activate_timeout_s = 60.0
+        droid.connect_gripper.return_value = {"connected": True}
+        for activation in [{"ok": False}, {"ok": True, "is_activated": False}]:
+            droid.activate_gripper.return_value = activation
+            self.assertFalse(init_gripper(droid, backend="franka"))
+        droid.activate_gripper.return_value = {"ok": True, "is_activated": True}
+        self.assertTrue(init_gripper(droid, backend="franka"))
+        droid.connect_gripper.return_value = {"connected": False}
+        self.assertFalse(init_gripper(droid, backend="franka"))
+
     def test_cli_keys_and_reset(self):
         phases = PhaseSelector()
         keys = Mock()
@@ -65,6 +99,10 @@ class PhaseCollectionTests(unittest.TestCase):
             episode_dir = Path(recorder.episode_dir)
             rows = [json.loads(line) for line in (episode_dir / "steps.jsonl").read_text().splitlines()]
             self.assertEqual([row["phase_index"] for row in rows], [0, 0, 1, 1, 2])
+            self.assertTrue(all(row["phase_prompt"] == "" for row in rows))
+            self.assertTrue(all(list(row)[-2:] == ["phase_index", "phase_prompt"] for row in rows))
+            meta = json.loads((episode_dir / "meta.json").read_text())
+            self.assertIn("phase_prompt", meta["schema"]["steps_jsonl"])
             exported = LeRobotExporter(ExportConfig(
                 run_dir=episode_dir, out_dir=Path(tmp) / "lerobot",
             )).export()
@@ -129,9 +167,10 @@ class PhaseCollectionTests(unittest.TestCase):
         state = SimpleNamespace(status="running", lock=threading.Lock(), phases=PhaseSelector())
         with patch.object(ui, "_state", state):
             self.assertEqual(ui.episode_phase({"phase_index": 2})["phase_index"], 2)
-            with self.assertRaises(HTTPException) as error:
-                ui.episode_phase({"phase_index": "3"})
-            self.assertEqual(error.exception.status_code, 400)
+            for invalid in ["3", True, -1, 4, None]:
+                with self.assertRaises(HTTPException) as error:
+                    ui.episode_phase({"phase_index": invalid})
+                self.assertEqual(error.exception.status_code, 400)
             state.status = "idle"
             with self.assertRaises(HTTPException) as error:
                 ui.episode_phase({"phase_index": 3})

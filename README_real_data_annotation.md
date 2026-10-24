@@ -83,7 +83,7 @@ The LeRobot steps below describe the alternative Parquet/video input route.
 
 | Missing | Fix |
 |---|---|
-| `phase_index` column (operator keypress during teleop) | implemented in teleop CLI/UI and LeRobot export — Section 4 |
+| `phase_index` column (operator keypress during teleop) | implemented in teleop CLI/UI and LeRobot export — Section 4 |/home/atomic/Project/atomic_policy/outputs/sorting_20261021_180802/checkpoints/latest_epoch471.ckpt
 | `phase_prompt` | lookup from `phase_label` — Section 6 |
 | `point_pixel` | Section 5 |
 | Absolute joint-target actions | check what the `action` column holds (velocities won't work); use logged absolute targets if present, else `action[t, :7] = joint_pos[t+1]` |
