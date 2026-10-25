@@ -44,7 +44,7 @@ Review object points for phases 0/1 and bin points for phases 2/3. The original
 recordings stay unchanged. Full-frame annotations must be mapped into the eventual
 training crop by the converter; alternatively replace `--full-frame` consistently
 with a verified `--roi X Y SIZE`. Never assume a crop fits new camera placement.
-The existing zarr converter still needs four-phase support before conversion.
+`scripts/convert_droidplus_to_zarr.py` supports four-phase recordings (labels 0-3, `phase_layout: four_phase`).
 
 ## Environment
 
@@ -257,3 +257,33 @@ The report records `method: human_click_correction`, `human_verified: true`, and
 `needs_review: false` for the saved segment. Other segments' flags are preserved;
 the episode still needs review if any other segment does. Use `--dry-run` to
 check the image/segment association without opening a browser or saving.
+
+## Review all flagged segments in one browser session (works over SSH)
+
+`scripts/annotate_sorting_points_review.py` queues every segment with
+`needs_review: true` across a dataset (add `--all` to queue every segment) and
+serves one page for clicking them in turn. It uses the same save path as the
+manual script (backup, correction history, `human_verified: true`). The slider or
+arrow keys pick any frame inside the segment, which helps when the gripper hides
+the target in the default frame.
+
+On the remote machine:
+
+```bash
+.venv-molmo/bin/python scripts/annotate_sorting_points_review.py \
+  --dataset-root data/output_1023_4phase_sorting_phase_prompt --dry-run   # list the queue
+.venv-molmo/bin/python scripts/annotate_sorting_points_review.py \
+  --dataset-root data/output_1023_4phase_sorting_phase_prompt --port 8765
+```
+
+On your own computer (macOS or Linux), open a tunnel and browse to
+`http://localhost:8765/`:
+
+```bash
+ssh -N -L 8765:127.0.0.1:8765 vast-atomic
+```
+
+Keys: click to place a point, **Enter** saves and moves to the next pending
+segment, **S** skips, **←/→** change frame, **N/P** next/previous segment. The
+server stays up until Ctrl+C, so you can stop and resume; already-saved segments
+are no longer flagged and drop out of the queue on the next start.

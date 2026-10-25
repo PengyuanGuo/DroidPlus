@@ -173,7 +173,7 @@ def make_handler(context: dict, state: dict, token: str, page: bytes, image: byt
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--image", type=Path, required=True, help="Raw left JPEG or molmo_previews/segment_NN.jpg")
-    parser.add_argument("--segment", type=int, choices=range(6), help="Optional segment check, 0–5")
+    parser.add_argument("--segment", type=int, help="Optional segment number check (0-5 two-phase, 0-11 four-phase)")
     parser.add_argument("--port", type=int, default=0, help="Local browser port; default chooses an available port")
     parser.add_argument("--dry-run", action="store_true", help="Validate image/segment without starting UI or modifying files")
     args = parser.parse_args()

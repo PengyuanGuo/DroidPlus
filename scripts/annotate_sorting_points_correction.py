@@ -1,5 +1,11 @@
 #!/usr/bin/env python3
-"""Replace one consecutive phase segment's points using a chosen left-camera image."""
+"""Correct failed phase-segment points.
+
+Default mode: replace one segment from a chosen left-camera image (--image).
+Auto mode (--auto DATASET_ROOT): for every [-1, -1] segment, run Molmo on the next
+--frames-per-round frames after those already tried, for up to --rounds rounds,
+and replace the segment with the first round that reaches a consensus point.
+"""
 from __future__ import annotations
 
 import argparse
@@ -37,7 +43,7 @@ def prepare_correction(image: Path, expected_segment: int | None = None) -> dict
     if image.parent.name == "molmo_previews":
         match = re.fullmatch(r"segment_(\d{2})\.jpg", image.name)
         if not match or not 0 <= int(match[1]) < len(source_segments):
-            raise ValueError("Preview must be named segment_00.jpg through segment_05.jpg")
+            raise ValueError(f"Preview must be named segment_00.jpg through segment_{len(source_segments) - 1:02d}.jpg")
         preview_segment = int(match[1])
         if expected_segment is not None and expected_segment != preview_segment:
             raise ValueError(f"Preview is segment {preview_segment:02d}, not requested segment {expected_segment:02d}")
@@ -130,6 +136,7 @@ def correction_prompts(segment: dict, primary: str | None, fallback: str | None)
 def apply_correction(
     context: dict, prediction: dict, settings: dict, *,
     method: str = "single_frame_molmo_correction", human_verified: bool = False,
+    segment_fields: dict | None = None,
 ) -> Path:
     """Update only the selected segment and its preview, retaining backup/history."""
     point = np.asarray(prediction["point_pixel"], dtype=float)
@@ -163,6 +170,8 @@ def apply_correction(
     }
     if human_verified:
         replacement["human_verified"] = True
+    # Multi-frame corrections supply their own samples/inlier counts/review flags.
+    replacement.update(segment_fields or {})
     report["segments"][index] = replacement
     report["needs_review"] = any(s["needs_review"] for s in report["segments"])
     # Keep every unselected row byte-for-byte, including spacing and line endings.
@@ -236,10 +245,89 @@ def apply_correction(
     return backup
 
 
+def failed_segments(dataset_root: Path) -> list[tuple[Path, dict, int, dict]]:
+    """(episode, report, segment index, segment) for every segment whose point is [-1, -1]."""
+    found = []
+    for report_path in sorted(dataset_root.rglob("molmo_point_annotations.json")):
+        report = json.loads(report_path.read_text())
+        for index, segment in enumerate(report["segments"]):
+            if segment["point_pixel"][0] < 0:
+                found.append((report_path.parent, report, index, segment))
+    return found
+
+
+def retry_frames(segment: dict, round_index: int, per_round: int) -> list[int]:
+    """Frames for one retry round: the next `per_round` frames after the last frame already tried."""
+    tried = [i for i in segment.get("sample_indices", []) if type(i) is int]
+    base = max(tried) + 1 if tried else segment["start_frame"]
+    first = base + round_index * per_round
+    return list(range(first, min(first + per_round, segment["end_frame"])))
+
+
+def auto_retry_segment(
+    grounder, settings: dict, episode: Path, index: int, rounds: int, per_round: int, min_valid: int,
+) -> Path | None:
+    """Run Molmo on successive frame windows until a consensus point is found; then replace the segment."""
+    rows, segments = read_episode(episode / "steps.jsonl")
+    segment = json.loads((episode / "molmo_point_annotations.json").read_text())["segments"][index]
+    prompts = correction_prompts(segments[index], None, None)
+    history = []
+    for round_index in range(rounds):
+        frames = retry_frames(segment, round_index, per_round)
+        if not frames:
+            LOG.info("  round %d: no frames left in segment", round_index + 1)
+            break
+        points, attempts = [], []
+        for frame in frames:
+            context = prepare_correction(episode / rows[frame]["images"]["left"], index)
+            attempt = {"frame_index": frame, "seq": rows[frame]["seq"], "errors": []}
+            try:
+                prediction = predict_point(grounder, context["rgb"], prompts)
+                points.append(prediction["point_pixel"])
+                attempt.update(prompt_used=prediction["prompt_used"], point_pixel=prediction["point_pixel"],
+                               errors=prediction["errors"])
+            except ValueError as exc:
+                attempt["errors"].append({"error": str(exc)})
+            attempts.append(attempt)
+        history.append({"round": round_index + 1, "frames": frames, "samples": attempts})
+        # Same consensus rule as annotate_sorting_points.ground_segment.
+        kept = np.asarray(points, dtype=np.float64).reshape(-1, 2)
+        if len(kept) > 2:
+            distances = np.linalg.norm(kept - np.median(kept, axis=0), axis=1)
+            kept = kept[distances <= float(np.median(distances) + 2 * np.std(distances)) + 1e-8]
+        required = min(min_valid, len(frames))
+        LOG.info("  round %d frames %d-%d: %d valid, %d inliers (need %d)",
+                 round_index + 1, frames[0], frames[-1], len(points), len(kept), required)
+        if len(kept) < required:
+            continue
+        point = kept.mean(axis=0).tolist()
+        preview_frame = next(a["frame_index"] for a in attempts if "point_pixel" in a)
+        context = prepare_correction(episode / rows[preview_frame]["images"]["left"], index)
+        prediction = {
+            "pixel_xy": None, "point_pixel": point, "prompt_used": prompts[0], "errors": [],
+            "primary_prompt": prompts[0], "fallback_prompt": prompts[1] if len(prompts) > 1 else "",
+            "auto_retry_rounds": history,
+        }
+        backup = apply_correction(context, prediction, settings, method="auto_retry_molmo", segment_fields={
+            "sample_indices": frames, "samples": attempts, "valid_predictions": len(points),
+            "inliers": len(kept), "required_inliers": required, "needs_review": False, "review_reasons": [],
+        })
+        LOG.info("  replaced with %s (backup %s)", point, backup.name)
+        return backup
+    LOG.warning("  still failed after %d rounds; left unchanged", len(history))
+    return None
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--image", type=Path, required=True, help="Raw left-camera JPEG or molmo_previews/segment_NN.jpg (resolved to its unmarked source)")
-    parser.add_argument("--segment", type=int, choices=range(6), help="Optional segment number 0..5 as a check (not phase_index)")
+    mode = parser.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--image", type=Path, help="Raw left-camera JPEG or molmo_previews/segment_NN.jpg (resolved to its unmarked source)")
+    mode.add_argument("--auto", type=Path, metavar="DATASET_ROOT",
+                      help="Retry every failed ([-1, -1]) segment under DATASET_ROOT on later frames")
+    parser.add_argument("--rounds", type=int, default=5, help="Auto mode: retry rounds per failed segment")
+    parser.add_argument("--frames-per-round", type=int, default=5, help="Auto mode: consecutive frames per round")
+    parser.add_argument("--min-valid-samples", type=int, default=3, help="Auto mode: inliers needed to accept a round")
+    parser.add_argument("--segment", type=int, help="Optional segment number as a check (not phase_index)")
     parser.add_argument("--prompt", help="Custom Molmo instruction; disables the old fallback unless --fallback-prompt is supplied")
     parser.add_argument("--fallback-prompt", help="Custom fallback; pass an empty string to disable it")
     parser.add_argument("--atomic-policy-root", type=Path, default=PROJECT / "atomic_policy-main")
@@ -251,20 +339,14 @@ def main() -> None:
     parser.add_argument("--dry-run", action="store_true", help="Locate/validate segment without loading model or writing files")
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
+    if args.auto:
+        auto_main(parser, args)
+        return
     try:
         context = prepare_correction(args.image, args.segment)
     except (ValueError, OSError, KeyError) as exc:
         parser.error(str(exc))
-    report = context["report"]
-    settings = {
-        "checkpoint": args.checkpoint or report["checkpoint"],
-        "dtype": args.dtype or report["dtype"],
-        "max_image_size": args.max_image_size if args.max_image_size is not None else report["max_image_size"],
-        "load_in_4bit": args.load_in_4bit if args.load_in_4bit is not None else report["load_in_4bit"],
-        "roi_xy_size": report.get("roi_xy_size"),
-    }
-    if settings["dtype"] not in ("bfloat16", "float32") or settings["max_image_size"] <= 0:
-        parser.error("Invalid model dtype or max-image-size")
+    settings = model_settings(parser, args, context["report"])
     try:
         prompts = correction_prompts(context["segment"], args.prompt, args.fallback_prompt)
     except ValueError as exc:
@@ -275,6 +357,28 @@ def main() -> None:
     LOG.info("ROI: %s; prompts: %s; preview: %s", settings["roi_xy_size"], prompts, context["preview_path"])
     if args.dry_run:
         return
+    grounder = load_grounder(parser, args, settings)
+    prediction = predict_point(grounder, context["rgb"], prompts)
+    LOG.info("Predicted pixel xy=%s; normalized xy=%s", prediction["pixel_xy"], prediction["point_pixel"])
+    backup = apply_correction(context, prediction, settings)
+    LOG.info("Updated only segment %02d (%d frames). Backup: %s", context["segment_index"], end - start, backup)
+    LOG.info("Inspect %s. The new single-frame prediction is flagged needs_review=true until visually reviewed.", context["preview_path"])
+
+
+def model_settings(parser, args, report: dict) -> dict:
+    settings = {
+        "checkpoint": args.checkpoint or report["checkpoint"],
+        "dtype": args.dtype or report["dtype"],
+        "max_image_size": args.max_image_size if args.max_image_size is not None else report["max_image_size"],
+        "load_in_4bit": args.load_in_4bit if args.load_in_4bit is not None else report["load_in_4bit"],
+        "roi_xy_size": report.get("roi_xy_size"),
+    }
+    if settings["dtype"] not in ("bfloat16", "float32") or settings["max_image_size"] <= 0:
+        parser.error("Invalid model dtype or max-image-size")
+    return settings
+
+
+def load_grounder(parser, args, settings: dict):
     import torch
 
     if not args.device.startswith("cuda") or not torch.cuda.is_available():
@@ -284,16 +388,43 @@ def main() -> None:
     sys.path.insert(0, str(args.atomic_policy_root.resolve()))
     from atomic_policy.vlm.grounder_molmo import MolmoPointGrounder
 
-    grounder = MolmoPointGrounder(
+    return MolmoPointGrounder(
         checkpoint=settings["checkpoint"], device=args.device, dtype=getattr(torch, settings["dtype"]),
         load_in_4bit=settings["load_in_4bit"], max_image_size=settings["max_image_size"],
     )
-    prediction = predict_point(grounder, context["rgb"], prompts)
-    LOG.info("Predicted pixel xy=%s; normalized xy=%s", prediction["pixel_xy"], prediction["point_pixel"])
-    backup = apply_correction(context, prediction, settings)
-    LOG.info("Updated only segment %02d (%d frames). Backup: %s", context["segment_index"], end - start, backup)
-    LOG.info("Inspect %s. The new single-frame prediction is flagged needs_review=true until visually reviewed.", context["preview_path"])
 
+
+def auto_main(parser, args) -> None:
+    if args.image or args.segment is not None or args.prompt is not None or args.fallback_prompt is not None:
+        parser.error("--auto uses each segment's default prompts; do not combine it with --image/--segment/--prompt")
+    if min(args.rounds, args.frames_per_round, args.min_valid_samples) <= 0:
+        parser.error("rounds, frames-per-round and min-valid-samples must be positive")
+    try:
+        failed = failed_segments(args.auto.resolve(strict=True))
+    except (ValueError, OSError, KeyError) as exc:
+        parser.error(str(exc))
+    for episode, _, index, segment in failed:
+        frames = [f for r in range(args.rounds) for f in retry_frames(segment, r, args.frames_per_round)]
+        LOG.info("%s segment %02d (%s): retry frames %s", episode.relative_to(args.auto.resolve()), index,
+                 segment["phase_prompt"], f"{frames[0]}-{frames[-1]}" if frames else "none left")
+    LOG.info("%d failed segments", len(failed))
+    if args.dry_run or not failed:
+        return
+    reports = [report for _, report, _, _ in failed]
+    settings = model_settings(parser, args, reports[0])
+    keys = ("checkpoint", "dtype", "max_image_size", "load_in_4bit", "roi_xy_size")
+    if any(model_settings(parser, args, r)[k] != settings[k] for r in reports for k in keys):
+        parser.error("Failed episodes were annotated with different model settings/ROI; run --auto per dataset")
+    grounder = load_grounder(parser, args, settings)
+    fixed = 0
+    for number, (episode, _, index, segment) in enumerate(failed, 1):
+        LOG.info("[%d/%d] %s segment %02d: %s", number, len(failed), episode.relative_to(args.auto.resolve()),
+                 index, segment["phase_prompt"])
+        fixed += auto_retry_segment(grounder, settings, episode, index, args.rounds, args.frames_per_round,
+                                    args.min_valid_samples) is not None
+    LOG.info("Auto retry fixed %d of %d failed segments; %d remain [-1, -1]", fixed, len(failed), len(failed) - fixed)
+    if fixed < len(failed):
+        sys.exit(2)
 
 if __name__ == "__main__":
     main()

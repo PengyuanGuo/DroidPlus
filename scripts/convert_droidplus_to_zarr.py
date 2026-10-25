@@ -17,6 +17,22 @@ LOG = logging.getLogger(__name__)
 PROJECT = Path(__file__).resolve().parents[1]
 SIZE = 224
 TEXT_LEN = 128
+PHASE_LAYOUTS = {
+    "two_phase": {"grasp": 0, "place": 1},
+    "four_phase": {"pre-grasp": 0, "grasp": 1, "pre-place": 2, "place": 3},
+}
+
+
+def phase_layout(path: Path, segments: list[dict]) -> str:
+    """Two-phase: 0,1 x3 segments. Four-phase: complete 0,1,2,3 cycles (one per object)."""
+    labels = [s["phase_index"] for s in segments]
+    if segments and segments[0]["phase_prompt"].startswith("pre-grasp "):
+        if not labels or len(labels) % 4 or labels != [0, 1, 2, 3] * (len(labels) // 4):
+            raise ValueError(f"{path}: expected complete four-phase cycles 0,1,2,3")
+        return "four_phase"
+    if labels != [0, 1, 0, 1, 0, 1]:
+        raise ValueError(f"{path}: expected six consecutive phase segments 0,1,0,1,0,1")
+    return "two_phase"
 
 
 def encode_text(text: str) -> np.ndarray:
@@ -115,7 +131,7 @@ def load_episode(path: Path, output_roi=None, wrist_roi=None, task_prompt=None, 
             values[7] = 1.0 - values[7]  # Native DROID 0=open -> training 1=open.
             target.append(values.astype(np.float32))
         phase, prompt = row.get("phase_index"), row.get("phase_prompt")
-        if type(phase) is not int or phase not in (0, 1) or not isinstance(prompt, str) or not prompt.strip():
+        if type(phase) is not int or phase not in (0, 1, 2, 3) or not isinstance(prompt, str) or not prompt.strip():
             raise ValueError(f"{path}: frame {frame}: invalid phase index/prompt")
         if not segments or segments[-1]["phase_index"] != phase:
             segments.append({"phase_index": phase, "phase_prompt": prompt, "start_frame": frame, "end_frame": frame})
@@ -140,8 +156,7 @@ def load_episode(path: Path, output_roi=None, wrist_roi=None, task_prompt=None, 
             if not isinstance(relative, str) or not (episode / relative).is_file():
                 raise ValueError(f"{path}: frame {frame}: missing {camera} image {relative!r}")
             paths[camera].append(episode / relative)
-    if [s["phase_index"] for s in segments] != [0, 1, 0, 1, 0, 1]:
-        raise ValueError(f"{path}: expected six consecutive phase segments 0,1,0,1,0,1")
+    layout = phase_layout(path, segments)
     saved_segments = report.get("segments", [])
     if len(saved_segments) != len(segments):
         raise ValueError(f"{path}: annotation report segments do not match frames")
@@ -180,7 +195,7 @@ def load_episode(path: Path, output_roi=None, wrist_roi=None, task_prompt=None, 
         notes.append("Raw steps.jsonl hash differs from annotation-time source; corrected steps_molmo.jsonl is the conversion input")
     return {
         "path": path, "sha256": input_sha, "report_path": report_path, "report_sha256": report_sha,
-        "n": n, "paths": paths, "left_shape": left_shape, "wrist_shape": wrist_shape,
+        "n": n, "paths": paths, "layout": layout, "left_shape": left_shape, "wrist_shape": wrist_shape,
         "left_roi": left_roi, "wrist_roi": wrist_crop, "source_roi": source_roi,
         "deltas": deltas,
         "data": {
@@ -193,7 +208,7 @@ def load_episode(path: Path, output_roi=None, wrist_roi=None, task_prompt=None, 
         "manifest": {
             "source_steps": str(path.resolve()), "source_sha256": input_sha,
             "annotation_report": str(report_path.resolve()), "annotation_report_sha256": report_sha,
-            "length": n, "instruction": instruction, "annotation_roi_xy_size": source_roi,
+            "length": n, "instruction": instruction, "phase_layout": layout, "annotation_roi_xy_size": source_roi,
             "agent_roi_xy_size": left_roi, "wrist_roi_xy_size": wrist_crop,
             "observed_fps_median": observed_fps,
             "nominal_record_rate_hz": (meta.get("control") or {}).get("record_rate_hz"),
@@ -225,6 +240,8 @@ def preflight(root: Path, *, roi=None, wrist_roi=None, max_episodes=0, task_prom
             raise ValueError(f"Cannot convert {path}: {exc}") from exc
         if not episodes:
             fixed_roi, fixed_wrist = episode["left_roi"], episode["wrist_roi"]
+        elif episode["layout"] != episodes[0]["layout"]:
+            raise ValueError(f"Mixed phase layouts: {path} is {episode['layout']}, first episode is {episodes[0]['layout']}")
         elif episode["left_shape"] != episodes[0]["left_shape"] or episode["wrist_shape"] != episodes[0]["wrist_shape"]:
             raise ValueError("All episodes must have the same raw camera dimensions for fixed-ROI deployment")
         episodes.append(episode)
@@ -320,7 +337,8 @@ def convert(episodes: list[dict], output: Path, *, chunk_frames=100, overwrite=F
             "wrist_raw_image_hw": list(episodes[0]["wrist_shape"][:2]),
             "image_color_space": "RGB", "data_image_layout": "NHWC", "cache_image_layout": "NCHW",
             "point_coordinate_system": "normalized xy in agent_view square ROI; origin top-left",
-            "phase_label_mapping": {"grasp": 0, "place": 1},
+            "phase_layout": episodes[0]["layout"],
+            "phase_label_mapping": PHASE_LAYOUTS[episodes[0]["layout"]],
             "gripper_semantics": "state/action last value: opening fraction, 0=closed, 1=open; converted as 1-native_fraction",
             "action_semantics": "7 absolute commanded joint targets [rad] + gripper opening command [0,1]",
             "temporal_sampling": "Original recorded frames, unchanged order, no resampling",
@@ -381,7 +399,7 @@ def main() -> None:
         n = sum(e["n"] for e in episodes)
         reviews = sum(bool(e["data"]["point_needs_review"].any()) for e in episodes)
         stale = sum(any("hash differs" in note for note in e["manifest"]["notes"]) for e in episodes)
-        LOG.info("Validated %d episodes, %d frames. Agent ROI=%s; wrist ROI=%s", len(episodes), n, episodes[0]["left_roi"], episodes[0]["wrist_roi"])
+        LOG.info("Validated %d %s episodes, %d frames. Agent ROI=%s; wrist ROI=%s", len(episodes), episodes[0]["layout"], n, episodes[0]["left_roi"], episodes[0]["wrist_roi"])
         if reviews:
             LOG.warning("%d episodes have point review flags. Flags are preserved; use --require-reviewed to reject these episodes.", reviews)
         if stale:
