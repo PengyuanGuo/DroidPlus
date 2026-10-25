@@ -1,0 +1,11 @@
+cd /home/sky/research/Project/DroidPlus
+
+export DATASET="$PWD/output_1023_4phase_sorting"
+export ATOMIC_POLICY_ROOT=/home/sky/research/Project/atomic_policy
+
+.venv-molmo/bin/python scripts/annotate_sorting_points.py \
+  --dataset-root "$DATASET" \
+  --atomic-policy-root "$ATOMIC_POLICY_ROOT" \
+  --full-frame \
+  --device cuda:0 \
+  --overwrite
