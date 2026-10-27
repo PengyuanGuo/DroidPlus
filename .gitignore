@@ -243,3 +243,6 @@ backups/
 
 data/
 reports/
+
+# Local API credentials
+/commands/api key chatgpt

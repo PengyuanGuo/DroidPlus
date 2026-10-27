@@ -9,6 +9,7 @@ pass a KeyPoller-backed closure for CLI, or ``threading.Event().is_set`` for a w
 """
 from __future__ import annotations
 
+import logging
 import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Callable
@@ -23,6 +24,9 @@ from droid_plus.utils import RateLimiter
 if TYPE_CHECKING:
     from droid_plus.eval.base_client import InferenceClient
     from droid_plus.robot import DroidPlus
+
+
+LOG = logging.getLogger(__name__)
 
 
 # ── Dataclasses ──────────────────────────────────────────────────────────────
@@ -119,7 +123,7 @@ def run_episode(
         bar_format="{desc}: {n_fmt}/{total_fmt} steps [{elapsed}<{remaining}, {rate_fmt}]" if step_limit else "{desc}: {n_fmt} steps [{elapsed}, {rate_fmt}]",
     )
 
-    last_gripper_cmd: float = 0.0
+    last_gripper_cmd: float | None = None
     last_gripper_obs: float = 0.0
     gripper_busy: bool = False
     _stopped_by_caller = False
@@ -139,7 +143,7 @@ def run_episode(
 
             t0 = time.time()
 
-            # Always refresh gripper state for busy gating / observation (best-effort).
+            # Refresh gripper feedback for observation and transition diagnostics (best-effort).
             try:
                 st_g = droid.gripper.gripper_state()
                 gripper_busy = bool(st_g.get("busy", False))
@@ -217,16 +221,16 @@ def run_episode(
                     t_wall_s=t0,
                 )
 
-            # Pipe gripper command (binary) on transitions only.
-            if (not session.dry_run) and (not gripper_busy) and (g_cmd_binary != float(last_gripper_cmd)):
-                try:
-                    if g_cmd_binary >= 0.5:
-                        droid.gripper.close_async(wait=False)
-                    else:
-                        droid.gripper.open_async(wait=False)
-                    last_gripper_cmd = g_cmd_binary
-                except Exception:
-                    pass
+            # Franky's nonblocking target interface can reverse a busy Hand.
+            # Do not suppress OPEN while a previous CLOSE is still in progress.
+            if (not session.dry_run) and g_cmd_binary != last_gripper_cmd:
+                if g_cmd_binary >= 0.5:
+                    droid.gripper.close_async(wait=False)
+                else:
+                    droid.gripper.open_async(wait=False)
+                last_gripper_cmd = g_cmd_binary
+                LOG.info("Gripper transition queued: %s (service busy=%s)",
+                         "close" if g_cmd_binary else "open", gripper_busy)
             pbar.update(1)
             if not session.dry_run:
                 droid.set_target_joint_state(q_cmd7, velocities=dq_cmd7.tolist(), seq=seq)

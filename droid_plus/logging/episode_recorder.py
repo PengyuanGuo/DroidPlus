@@ -62,6 +62,7 @@ class EpisodeRecorder:
         jpeg_quality: int = 90,
         max_image_queue: int = 8192,
         cameras: list[str] | None = None,
+        phase_prompts: dict[int, str] | None = None,
     ) -> None:
         """
         Initialize episode recorder.
@@ -72,11 +73,16 @@ class EpisodeRecorder:
             jpeg_quality: JPEG quality for recorded images (1-100)
             max_image_queue: Max queue size for async image writer
             cameras: List of camera names to record (default: ["left", "wrist"])
+            phase_prompts: Optional phase ID-to-name mapping saved with every labelled row.
         """
         self.base_run_dir = base_run_dir
         self.episode_idx = episode_idx
         self.jpeg_quality = jpeg_quality
         self.cameras = cameras or ["left", "wrist"]
+        self.phase_prompts = dict(phase_prompts or {})
+        if any(type(k) is not int or not 0 <= k <= 127 or not isinstance(v, str) or not v.strip()
+               for k, v in self.phase_prompts.items()):
+            raise ValueError("phase_prompts must map integer phases 0..127 to nonempty strings")
 
         # Create episode directory
         self.episode_dir = os.path.join(base_run_dir, f"episode_{episode_idx:03d}")
@@ -122,8 +128,8 @@ class EpisodeRecorder:
             action_velocities: Commanded action velocities (8,)
             t_wall_s: Wall clock time (defaults to now)
             phase_index: Optional zero-based operator phase label (0–127).
-                Labelled steps end with phase_index and phase_prompt; the prompt
-                defaults to an empty string for annotation after collection.
+                Labelled steps end with phase_index and phase_prompt. The prompt
+                uses phase_prompts when configured, otherwise defaults to empty.
             extra: Additional fields to include in step data
 
         Returns:
@@ -134,6 +140,8 @@ class EpisodeRecorder:
 
         if phase_index is not None and (type(phase_index) is not int or not 0 <= phase_index <= 127):
             raise ValueError("phase_index must be an integer in [0, 127]")
+        if phase_index is not None and self.phase_prompts and phase_index not in self.phase_prompts:
+            raise ValueError(f"No phase prompt configured for phase {phase_index}")
         t_wall_s = t_wall_s or time.time()
         image_paths: dict[str, str] = {}
 
@@ -171,7 +179,8 @@ class EpisodeRecorder:
 
         if phase_index is not None:
             step_data["phase_index"] = phase_index
-            step_data["phase_prompt"] = step_data.pop("phase_prompt", "")
+            prompt = step_data.pop("phase_prompt", "")
+            step_data["phase_prompt"] = self.phase_prompts.get(phase_index, prompt)
         self._data_writer.append(step_data)
         if phase_index is not None:
             self.phase_labels.append(phase_index)
@@ -265,7 +274,11 @@ class EpisodeRecorder:
 
         if self.phase_labels:
             meta["schema"]["steps_jsonl"]["phase_index"] = "int (zero-based operator phase)"
-            meta["schema"]["steps_jsonl"]["phase_prompt"] = "str (empty until annotated after collection)"
+            meta["schema"]["steps_jsonl"]["phase_prompt"] = (
+                "str (configured phase name saved during collection)" if self.phase_prompts
+                else "str (empty until annotated after collection)")
+        if self.phase_prompts:
+            meta["phase_prompt_mapping"] = self.phase_prompts
         if extra_meta:
             meta.update(extra_meta)
 

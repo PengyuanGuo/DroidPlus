@@ -24,7 +24,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import HTMLResponse
 
 from droid_plus.analysis.end_effector_pose import compute_and_save_ee_trajectory_single
-from droid_plus.constants import DEFAULT_POLICY, POLICIES, RECORD_JPEG_QUALITY
+from droid_plus.constants import DEFAULT_POLICY, POLICIES, RECORD_JPEG_QUALITY, FRANKY_SERVICE_URL, GRIPPER_SERVICE_URL
 from droid_plus.eval.episode_runner import (
     EpisodeConfig,
     EpisodeResult,
@@ -1172,6 +1172,12 @@ def main() -> None:
 
     p = argparse.ArgumentParser(description="Web UI for running policy experiments")
     p.add_argument("--port", type=int, default=DEFAULT_PORT, help=f"Web server port (default: {DEFAULT_PORT})")
+    p.add_argument("--franky-service-url", default=FRANKY_SERVICE_URL,
+        help="Franky service URL for arm control and the Franka Hand")
+    p.add_argument("--gripper", choices=("franka", "robotiq"), default="franka",
+        help="Gripper backend (default: franka, through the Franky service)")
+    p.add_argument("--gripper-service-url", default=GRIPPER_SERVICE_URL,
+        help="Robotiq service URL; ignored when --gripper franka")
     p.add_argument("--policy", default=DEFAULT_POLICY, help=f"Default policy (available: {', '.join(POLICIES.keys())})")
     p.add_argument("--policy-path", type=Path,
         help="Local LeRobot diffusion checkpoint directory; required for --policy diffusion")
@@ -1209,7 +1215,9 @@ def main() -> None:
     )
 
     print("Initializing robot...")
-    droid = DroidPlus()
+    gripper_url = args.franky_service_url if args.gripper == "franka" else args.gripper_service_url
+    print(f"Gripper backend: {args.gripper} ({gripper_url})")
+    droid = DroidPlus(franky_service_url=args.franky_service_url, gripper_service_url=gripper_url)
     wait_for_cameras(droid)
 
     base_run_dir: str | None = None

@@ -27,6 +27,7 @@ from dataclasses import dataclass, field, replace
 from typing import Any
 
 import uvicorn
+import numpy as np
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import HTMLResponse
 
@@ -43,12 +44,13 @@ from droid_plus.datagen import (
     DEFAULT_MIN_EE_Z,
     TeleopSessionConfig,
     build_fk_model,
-    connect_so101,
     finalize_teleop_episode_recording,
     init_gripper,
     make_teleop_run_dir,
     run_teleop_episode,
 )
+from droid_plus.datagen.spacemouse_runner import run_spacemouse_episode
+from droid_plus.datagen.spacemouse import add_controller_arguments, connect_controller
 from droid_plus.eval.episode_runner import EpisodeConfig, EpisodeResult
 from droid_plus.eval.experiment_setup import wait_for_cameras
 from droid_plus.logging import EpisodeRecorder
@@ -57,6 +59,30 @@ from droid_plus.robot import DroidPlus
 from droid_plus.utils import KeyPoller
 
 DEFAULT_PORT = 54325
+PHASE_NAMES = ("pre-grasp", "grasp", "pre-place", "place")
+SAVE_PHASE_PROMPTS = False
+REQUIRED_CAMERAS: tuple[str, ...] = ()
+
+
+def configure_phase_profile(names: tuple[str, ...], *, save_prompts: bool = False,
+                            required_cameras: tuple[str, ...] = ()) -> None:
+    """Configure a task-specific launcher without duplicating the web/robot loop."""
+    if not 1 <= len(names) <= 10 or any(not isinstance(name, str) or not name.strip() for name in names):
+        raise ValueError("Configure 1..10 nonempty phase names for digit-key selection")
+    if any(role not in ("left", "wrist", "right") for role in required_cameras):
+        raise ValueError("Unknown required camera role")
+    global PHASE_NAMES, SAVE_PHASE_PROMPTS, REQUIRED_CAMERAS
+    PHASE_NAMES, SAVE_PHASE_PROMPTS, REQUIRED_CAMERAS = tuple(names), save_prompts, tuple(required_cameras)
+
+
+def verify_required_cameras(droid: DroidPlus) -> None:
+    for role in REQUIRED_CAMERAS:
+        if not getattr(droid, f"{role}_camera_id", ""):
+            raise RuntimeError(f"{role} camera ID is empty; recording requires this camera")
+        image = getattr(droid, f"get_{role}_image")()
+        if not isinstance(image, np.ndarray) or image.dtype != np.uint8 or image.ndim != 3 or image.shape[2] != 3 or min(image.shape[:2]) <= 0:
+            raise RuntimeError(f"{role} camera did not return a valid RGB image; recording not started")
+        print(f"[camera] {role}={getattr(droid, f'{role}_camera_id')}: RGB {image.shape[1]}x{image.shape[0]} verified")
 
 
 # ── Shared state ─────────────────────────────────────────────────────────────
@@ -102,6 +128,7 @@ def _run_episode_thread(state: AppState) -> None:
     try:
         recorder: EpisodeRecorder | None = None
         if state.session.record and state.base_run_dir is not None:
+            verify_required_cameras(state.droid)
             record_cameras = [
                 name for name, cid in (
                     ("left", state.droid.left_camera_id),
@@ -115,9 +142,12 @@ def _run_episode_thread(state: AppState) -> None:
                 episode_idx=state.episode_idx,
                 jpeg_quality=state.session.record_jpeg_quality,
                 cameras=record_cameras or ["left", "wrist"],
+                phase_prompts=dict(enumerate(PHASE_NAMES)) if SAVE_PHASE_PROMPTS else None,
             )
 
-        result = run_teleop_episode(
+        episode_runner = (run_spacemouse_episode if state.session.policy_name == "teleop_spacemouse"
+                          else run_teleop_episode)
+        result = episode_runner(
             config=state.current_config,
             session=state.session,
             droid=state.droid,
@@ -268,7 +298,7 @@ LANDING_PAGE_HTML = """<!doctype html>
       <div class="card-label">Teleop</div>
       <div class="field-grid">
         <div class="field-cell">
-          <label>SO-101 port <span class="hint">set at launch with <code>--port</code></span></label>
+          <label>Controller device <span class="hint">set at launch with <code>--controller</code></span></label>
           <div class="field-readonly" id="so101_port">—</div>
         </div>
         <div class="field-cell">
@@ -323,10 +353,7 @@ LANDING_PAGE_HTML = """<!doctype html>
 
     <div class="card">
       <div class="card-label">Phase: <span id="current_phase">0</span></div>
-      <p>Starts at 0 (pre-grasp) each episode. Pause ~0.5 s at a boundary,
-      select the phase, then continue. Number keys 0–3 work when focus is outside a text field.
-      Select 0 again for the next item. Each step saves phase_index and an empty
-      phase_prompt for annotation after collection.</p>
+      <p>__PHASE_GUIDANCE__</p>
       <div id="phase_buttons"></div>
       <span id="phase_error" role="alert"></span>
     </div>
@@ -647,7 +674,7 @@ LANDING_PAGE_HTML = """<!doctype html>
       }
     });
 
-    const phaseNames = ["pre-grasp", "grasp", "pre-place", "place"];
+    const phaseNames = __PHASE_NAMES_JSON__;
     function phaseLabel(phase) { return `${phase}: ${phaseNames[phase]}`; }
 
     async function selectPhase(phase) {
@@ -674,7 +701,7 @@ LANDING_PAGE_HTML = """<!doctype html>
 
     document.addEventListener("keydown", (e) => {
       if (e.repeat || e.ctrlKey || e.metaKey || e.altKey) return;
-      if (/^[0-3]$/.test(e.key) && !e.target.matches("input, textarea, select, [contenteditable]")) {
+      if (/^[0-9]$/.test(e.key) && Number(e.key) < phaseNames.length && !e.target.matches("input, textarea, select, [contenteditable]")) {
         e.preventDefault();
         selectPhase(Number(e.key));
       }
@@ -698,7 +725,12 @@ _state: AppState | None = None
 
 @app.get("/", response_class=HTMLResponse)
 def root():
-    return HTMLResponse(content=LANDING_PAGE_HTML)
+    last = len(PHASE_NAMES) - 1
+    guidance = (f"Each episode starts at phase 0. Pause at boundaries, select the phase, then continue. "
+                f"Use buttons or number keys 0–{last} outside text fields. "
+                + ("Follow the phases in order once per episode. Each row saves phase_index and its phase_prompt."
+                   if SAVE_PHASE_PROMPTS else "Select 0 again for the next item. Phase prompts are annotated after collection."))
+    return HTMLResponse(content=LANDING_PAGE_HTML.replace("__PHASE_NAMES_JSON__", json.dumps(PHASE_NAMES)).replace("__PHASE_GUIDANCE__", guidance))
 
 
 @app.get("/config")
@@ -812,8 +844,8 @@ def episode_phase(body: dict):
             raise HTTPException(409, "no episode running")
         try:
             phase = body.get("phase_index")
-            if type(phase) is not int or not 0 <= phase <= 3:
-                raise ValueError("phase_index must be an integer in [0, 3]")
+            if type(phase) is not int or not 0 <= phase < len(PHASE_NAMES):
+                raise ValueError(f"phase_index must be an integer in [0, {len(PHASE_NAMES) - 1}]")
             s.phases.set(phase)
         except ValueError as e:
             raise HTTPException(400, str(e))
@@ -897,7 +929,7 @@ def episode_label(body: dict):
 def main() -> None:
     global _state
 
-    p = argparse.ArgumentParser(description="Web UI for SO-101 teleop data collection")
+    p = argparse.ArgumentParser(description="Web UI for SO-101 or SpaceMouse teleop data collection")
     p.add_argument("--web-port", type=int, default=DEFAULT_PORT,
         help=f"Web server port (default: {DEFAULT_PORT})")
     p.add_argument("--port", default="/dev/ttyACM0", help="SO-101 leader serial port")
@@ -929,8 +961,12 @@ def main() -> None:
     p.add_argument("--output-dir", default="output", help="Base output directory for recordings")
     p.add_argument("--task", default="", help="Task name (used for the run directory)")
     p.add_argument("--dry-run", action="store_true",
-        help="Read SO-101 but do not command the robot or gripper")
+        help="Read controller but do not command the robot or gripper")
+    add_controller_arguments(p)
     args = p.parse_args()
+    for role in REQUIRED_CAMERAS:
+        if not str(getattr(args, f"{role}_camera_id")).strip():
+            p.error(f"--{role}-camera-id is required for this collection profile")
 
     gripper_backend = "none" if args.no_gripper else str(args.gripper)
     if gripper_backend == "franka":
@@ -945,6 +981,11 @@ def main() -> None:
         record_jpeg_quality=int(args.record_jpeg_quality),
         min_z=float(args.min_z),
         dry_run=bool(args.dry_run),
+        policy_name=f"teleop_{args.controller}",
+        controller_info={key: getattr(args, key) for key in (
+            "controller", "spacemouse_device", "linear_speed", "angular_speed",
+            "joint_speed", "deadzone", "input_timeout", "enable_button", "gripper_button", "axis_map", "button_mode",
+        )},
         record=bool(args.record),
     )
 
@@ -960,15 +1001,20 @@ def main() -> None:
         right_camera_serial=args.right_camera_id,
     )
     wait_for_cameras(droid)
+    if session.record:
+        verify_required_cameras(droid)
 
     try:
         pin_model, pin_data, ee_frame = build_fk_model(args.franky_service_url)
     except Exception as e:
+        if args.controller == "spacemouse":
+            raise RuntimeError("SpaceMouse requires a valid URDF and Pinocchio") from e
         print(f"WARNING: FK unavailable ({e}) — Z safety DISABLED")
         pin_model = pin_data = ee_frame = None
 
     try:
-        droid.stop()
+        if not args.dry_run:
+            droid.stop()
     except Exception:
         pass
 
@@ -980,7 +1026,7 @@ def main() -> None:
         print(f"Skipping gripper initialization ({reason}).")
 
     settle_s = 2.0 if (gripper_initialized and gripper_backend == "robotiq") else 0.0
-    teleop = connect_so101(args.port, settle_s=settle_s)
+    teleop = connect_controller(args, settle_s=settle_s)
 
     base_run_dir: str | None = None
     if session.record:
@@ -994,20 +1040,20 @@ def main() -> None:
         pin_data=pin_data,
         ee_frame=ee_frame,
         session=session,
-        so101_port=args.port,
+        so101_port=args.port if args.controller == "so101" else (args.spacemouse_device or "SpaceMouse (auto)"),
         base_run_dir=base_run_dir,
     )
 
     print("\n  teleop_service")
     print(f"    UI:            http://localhost:{args.web_port}")
-    print(f"    SO-101:        {args.port}")
+    print(f"    Controller:    {args.controller}")
     print(f"    Gripper:       {'initialized' if gripper_initialized else 'disabled'}")
     print(f"    Control rate:  {session.rate_hz} Hz")
     print(f"    Record rate:   {session.record_rate_hz} Hz")
     print(f"    Record:        {base_run_dir or 'disabled'}")
     print(f"    Dry run:       {session.dry_run}")
-    print("\n  Phases: 0=pre-grasp, 1=grasp, 2=pre-place, 3=place.")
-    print("  Terminal: 0–3 to select phase, ESC to stop episode, Ctrl+C to quit.\n")
+    print("\n  Phases: " + ", ".join(f"{i}={name}" for i, name in enumerate(PHASE_NAMES)))
+    print(f"  Terminal: 0–{len(PHASE_NAMES) - 1} to select phase, ESC to stop episode, Ctrl+C to quit.\n")
 
     server_thread = threading.Thread(
         target=uvicorn.run,
@@ -1023,7 +1069,7 @@ def main() -> None:
                 if ch == "\x1b" and _state.status == "running":
                     print("\n[terminal] ESC → stopping episode...")
                     _state.stop_event.set()
-                if ch is not None and ch in "0123":
+                if ch is not None and ch in "0123456789" and int(ch) < len(PHASE_NAMES):
                     with _state.lock:
                         if _state.status == "running":
                             _state.phases.set(int(ch))
@@ -1037,6 +1083,8 @@ def main() -> None:
             if _state.episode_thread:
                 _state.episode_thread.join(timeout=5)
 
+    if args.controller == "spacemouse":
+        teleop.disconnect()
     if gripper_initialized:
         try:
             droid.gripper.shutdown_async()

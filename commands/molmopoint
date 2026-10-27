@@ -1,0 +1,34 @@
+cd /home/atomic/Project/DroidPlus
+source .venv-molmo/bin/activate
+
+for episode in output_1023_4phase_sorting/teleop_*/episode_*; do
+  [ -f "$episode/steps.jsonl" ] || continue
+  [[ "$episode" == */teleop_20261023_192358/episode_000 ]] && continue
+  [ -f "$episode/steps_molmo.jsonl" ] && continue
+
+  python scripts/annotate_sorting_points.py \
+    --dataset-root "$episode" \
+    --atomic-policy-root /home/atomic/Project/atomic_policy \
+    --full-frame \
+    --device cuda:0
+
+  status=$?
+  if [ "$status" -eq 2 ]; then
+    echo "Needs review: $episode"
+  elif [ "$status" -ne 0 ]; then
+    echo "Stopped on error: $episode"
+    break
+  fi
+done
+
+mannual:
+python scripts/annotate_sorting_points_manual.py \
+  --image PATH/TO/EPISODE/molmo_previews/segment_10.jpg \
+  --segment 10
+
+run it again:
+python scripts/annotate_sorting_points_correction.py \
+  --image output_1023_4phase_sorting/teleop_20261023_192358/episode_001/molmo_previews/segment_10.jpg \
+  --segment 10 \
+  --atomic-policy-root /home/atomic/Project/atomic_policy \
+  --device cuda:0

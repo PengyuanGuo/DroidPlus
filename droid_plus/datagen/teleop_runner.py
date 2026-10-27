@@ -51,6 +51,7 @@ class TeleopSessionConfig:
     dry_run: bool = False
     record: bool = True
     policy_name: str = "teleop_so101"
+    controller_info: dict | None = None
 
 
 # ── Episode runner ───────────────────────────────────────────────────────────
@@ -233,9 +234,17 @@ def finalize_teleop_episode_recording(
     if result.recorder is None:
         return
     effective_rate = session.rate_hz / max(1, round(session.rate_hz / session.record_rate_hz))
+    effective_rate = getattr(result, "actual_record_rate_hz", effective_rate)
     phase_review = review_phase_labels(
         result.recorder.phase_labels, min_frames=max(1, int(np.ceil(0.5 * effective_rate))),
     )
+    if result.recorder.phase_prompts:
+        expected = sorted(result.recorder.phase_prompts)
+        phase_review["expected_phase_sequence"] = expected
+        observed = [segment["phase_index"] for segment in phase_review["segments"]]
+        if observed != expected:
+            phase_review["issues"].append(f"Expected phases {expected}, recorded {observed}")
+            phase_review["needs_review"] = True
     for issue in phase_review["issues"]:
         print(f"[phase] REVIEW: {issue}")
     try:
@@ -246,6 +255,8 @@ def finalize_teleop_episode_recording(
             notes=config.notes,
             policy_info={"name": session.policy_name},
             control_info={
+                "controller": session.controller_info or {"type": "so101"},
+                "motion_mode": "xyz_yaw" if session.policy_name == "teleop_spacemouse" else "joint",
                 "rate_hz": session.rate_hz,
                 "record_rate_hz": effective_rate,
                 "requested_record_rate_hz": session.record_rate_hz,

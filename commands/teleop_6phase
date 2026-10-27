@@ -1,0 +1,16 @@
+cd /home/atomic/Project/DroidPlus
+source .venv-teleop/bin/activate
+
+export WRIST_CAMERA_SERIAL=14633207
+export LEFT_CAMERA_SERIAL=31262010
+
+sudo chmod 666 /dev/ttyACM0
+
+.venv-teleop/bin/python scripts/run_teleop_drawer_6phase_ui.py \
+  --gripper franka \
+  --franky-service-url http://192.168.9.167:54321 \
+  --left-camera-id 31262010 \
+  --wrist-camera-id 14633207 \
+  --port /dev/ttyACM0 \
+  --web-port 54325 \
+  --output-dir output_1024_drawer_6phase

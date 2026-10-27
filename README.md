@@ -134,6 +134,8 @@ make run_experiment_900 INSTRUCTION="pick up the can" NOTES="experiment notes"
 
 ## Teleoperation
 
+[SpaceMouse teleoperation](docs/spacemouse.md) is available with `--controller spacemouse` in both the CLI and web UI.
+
 See [docs/teleop.md](docs/teleop.md) for full details including joint mapping and safety features.
 
 ```bash

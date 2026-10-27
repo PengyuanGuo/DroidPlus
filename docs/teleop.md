@@ -1,6 +1,6 @@
 # Teleoperation
 
-Teleoperate the Franka using an SO-101 leader arm. Records data in the same format as the experiment runners.
+Teleoperate the Franka using an SO-101 leader arm. For six-axis Cartesian control instead, see [SpaceMouse teleoperation](spacemouse.md). Records data in the same format as the experiment runners.
 
 ![Teleop walkthrough](images/teleop_video.mp4){width=100%}
 

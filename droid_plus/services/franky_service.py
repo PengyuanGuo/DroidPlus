@@ -600,6 +600,9 @@ class AppState:
     control_thread: threading.Thread | None
     last_control_error: str | None
     command_timeout_s: float
+    # Diagnostic snapshots are replaced atomically; no extra control locks.
+    target_timing: dict[str, Any] = field(default_factory=dict)
+    control_timing: dict[str, Any] = field(default_factory=dict)
     # Franka Hand (optional; shares robot IP, separate libfranka connection).
     # Homing follows GELLO (home once, Move-only, no Grasp). Streaming does NOT:
     # see _gripper_command_loop for why (Move is point-to-point; every retarget
@@ -1091,7 +1094,16 @@ def _control_loop(*, st: AppState, control_hz: int, timeout_s: float) -> None:
             target = franky.JointState(latest.positions, latest.velocities)
             # Keep holding the last target until preempted (better streaming behavior).
             motion = franky.JointMotion(target)
-            robot.move(motion, asynchronous=True)
+            move_started = time.monotonic()
+            st.control_timing = {"seq": latest.seq, "in_move": True, "started_wall_s": time.time()}
+            try:
+                robot.move(motion, asynchronous=True)
+            finally:
+                st.control_timing = {
+                    "seq": latest.seq, "in_move": False,
+                    "move_ms": (time.monotonic() - move_started) * 1000,
+                    "finished_wall_s": time.time(),
+                }
             st.last_control_error = None
         except Exception as e:
             st.last_control_error = f"{type(e).__name__}: {e}"
@@ -1174,6 +1186,23 @@ async def _lifespan(app: FastAPI):
 app = FastAPI(lifespan=_lifespan)
 
 
+@app.middleware("http")
+async def target_request_timing(request: Request, call_next):
+    """Observe target processing without changing queue or robot semantics."""
+    if request.method != "POST" or request.url.path != "/target_joint_state":
+        return await call_next(request)
+    started = time.monotonic()
+    response = await call_next(request)
+    elapsed_ms = (time.monotonic() - started) * 1000
+    response.headers["Server-Timing"] = f"target_request;dur={elapsed_ms:.3f}"
+    st = getattr(request.app.state, "franky_state", None)
+    if st is not None:
+        st.target_timing = {**st.target_timing, "request_ms": elapsed_ms,
+                            "status": response.status_code, "finished_wall_s": time.time()}
+    return response
+
+
+
 # @app.middleware("http")
 # async def _optional_ip_allowlist(request: Request, call_next):
 #     """Optionally block requests unless ALLOWED_CLIENT_IP matches the peer IP."""
@@ -1208,6 +1237,8 @@ def health(request: Request):
         gripper_homed = bool(current_app_state.gripper_homed)
         gripper_err = current_app_state.gripper_last_error
     return {
+        "target_timing": current_app_state.target_timing,
+        "control_timing": current_app_state.control_timing,
         "robot_connected": current_app_state.robot is not None,
         "stop_latched": current_app_state.stop_latched,
         "has_target": current_app_state.latest_target is not None,
@@ -1235,9 +1266,15 @@ def post_target_joint_state(payload: JointTargetIn, request: Request) -> JointTa
         seq=payload.seq,
         accepted_timestamp_s=now,
     )
+    lock_started = time.monotonic()
     with current_app_state.lock:
+        acquired = time.monotonic()
         current_app_state.latest_target = target
         current_app_state.stop_latched = False
+    current_app_state.target_timing = {
+        "seq": payload.seq, "lock_wait_ms": (acquired - lock_started) * 1000,
+        "queue_update_ms": (time.monotonic() - acquired) * 1000,
+    }
 
     return JointTargetOut(
         positions=target.positions,

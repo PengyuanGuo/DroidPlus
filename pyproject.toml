@@ -53,6 +53,10 @@ analysis = [
     "matplotlib",
     "pin",
 ]
+spacemouse = [
+    "pyspacemouse>=2.1.0,<3",
+    "pin",
+]
 teleop = [
     "lerobot[feetech]>=0.4.3,<0.5",
 ]

@@ -1,0 +1,10 @@
+cd /home/atomic/Project/DroidPlus
+source .venv-teleop/bin/activate
+
+export WRIST_CAMERA_SERIAL=14633207
+export LEFT_CAMERA_SERIAL=31262010
+
+sudo chmod 666 /dev/ttyACM0
+
+python scripts/run_teleop_ui.py   --port /dev/ttyACM0   --franky-service-url http://192.168.9.167:54321   --web-port 54325   --output-dir output_phase_sorting   --record-rate-hz 15 --gripper franka
+

@@ -35,12 +35,13 @@ from droid_plus.datagen import (
     DEFAULT_MIN_EE_Z,
     TeleopSessionConfig,
     build_fk_model,
-    connect_so101,
     finalize_teleop_episode_recording,
     init_gripper,
     make_teleop_run_dir,
     run_teleop_episode,
 )
+from droid_plus.datagen.spacemouse_runner import run_spacemouse_episode
+from droid_plus.datagen.spacemouse import add_controller_arguments, connect_controller
 from droid_plus.eval.episode_runner import EpisodeConfig
 from droid_plus.eval.experiment_setup import wait_for_cameras
 from droid_plus.logging import EpisodeRecorder
@@ -76,14 +77,14 @@ def _make_cli_should_stop(keys: KeyPoller, stop_flag: list[bool], phases: PhaseS
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Teleop SO-101 leader arm to Franka with recording")
+    parser = argparse.ArgumentParser(description="Teleop Franka with SO-101 or SpaceMouse, with recording")
     parser.add_argument("--port", default="/dev/ttyACM0", help="SO-101 leader serial port")
     parser.add_argument("--franky-service-url", default=FRANKY_SERVICE_URL,
         help="Franky service URL (robot control + URDF fetch)")
     parser.add_argument(
         "--gripper",
         choices=["none", "robotiq", "franka"],
-        default="robotiq",
+        default="franka",
         help="Gripper backend: robotiq (local gripper_service), franka (Hand via franky_service), none",
     )
     parser.add_argument("--no-gripper", action="store_true",
@@ -108,7 +109,8 @@ def main() -> None:
     parser.add_argument("--task", default="", help="Task name (recorded in meta.json + run dir)")
     parser.add_argument("--notes", default="", help="Free-form notes (recorded in meta.json)")
     parser.add_argument("--dry-run", action="store_true",
-        help="Read SO-101 but do not command the robot or gripper")
+        help="Read controller but do not command the robot or gripper")
+    add_controller_arguments(parser)
     args = parser.parse_args()
 
     gripper_backend = "none" if args.no_gripper else str(args.gripper)
@@ -125,6 +127,11 @@ def main() -> None:
         record_jpeg_quality=int(args.record_jpeg_quality),
         min_z=float(args.min_z),
         dry_run=bool(args.dry_run),
+        policy_name=f"teleop_{args.controller}",
+        controller_info={key: getattr(args, key) for key in (
+            "controller", "spacemouse_device", "linear_speed", "angular_speed",
+            "joint_speed", "deadzone", "input_timeout", "enable_button", "gripper_button", "axis_map", "button_mode",
+        )},
         record=bool(record),
     )
 
@@ -145,12 +152,15 @@ def main() -> None:
     try:
         pin_model, pin_data, ee_frame = build_fk_model(args.franky_service_url)
     except Exception as e:
+        if args.controller == "spacemouse":
+            raise RuntimeError("SpaceMouse requires a valid URDF and Pinocchio") from e
         print(f"WARNING: FK unavailable ({e}) — Z safety DISABLED")
         pin_model = pin_data = ee_frame = None
 
     # Safety: stop before anything moves.
     try:
-        droid.stop()
+        if not args.dry_run:
+            droid.stop()
     except Exception:
         pass
 
@@ -164,7 +174,7 @@ def main() -> None:
 
     # Robotiq shares a USB hub with SO-101; Franka Hand is Ethernet — no settle needed.
     settle_s = 2.0 if (gripper_initialized and gripper_backend == "robotiq") else 0.0
-    teleop = connect_so101(args.port, settle_s=settle_s)
+    teleop = connect_controller(args, settle_s=settle_s)
 
     # ── Run directory ────────────────────────────────────────────────────
     base_run_dir: str | None = None
@@ -172,8 +182,11 @@ def main() -> None:
         base_run_dir = make_teleop_run_dir(args.task, parent=args.output_dir)
         print(f"Recording to {base_run_dir}")
         record_every_n = max(1, round(session.rate_hz / session.record_rate_hz))
-        print(f"Control loop: {session.rate_hz} Hz | Recording every {record_every_n} ticks "
-              f"(~{session.rate_hz / record_every_n:.1f} Hz)")
+        if args.controller == "spacemouse":
+            print(f"Control target: {session.rate_hz} Hz | Independent recording target: {session.record_rate_hz} Hz")
+        else:
+            print(f"Control loop: {session.rate_hz} Hz | Recording every {record_every_n} ticks "
+                  f"(~{session.rate_hz / record_every_n:.1f} Hz)")
 
     # ── Stop flag for SIGINT/SIGTERM ─────────────────────────────────────
     stop_flag: list[bool] = [False]
@@ -205,6 +218,8 @@ def main() -> None:
             episode_idx=episode_idx,
         )
     finally:
+        if args.controller == "spacemouse":
+            teleop.disconnect()
         # ── Cleanup (always runs, incl. on exceptions) ───────────────────
         if gripper_initialized:
             try:
@@ -284,7 +299,8 @@ def _episode_loop(
             phases = PhaseSelector()
             print("[phase] Starting at 0. Keys 0–9 select phase IDs; pause ~0.5 s, press, then continue.")
             should_stop = _make_cli_should_stop(keys, stop_flag, phases)
-            result = run_teleop_episode(
+            episode_runner = run_spacemouse_episode if args.controller == "spacemouse" else run_teleop_episode
+            result = episode_runner(
                 config=config,
                 session=session,
                 droid=droid,

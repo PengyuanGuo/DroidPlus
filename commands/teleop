@@ -1,9 +1,0 @@
-cd /home/atomic/Project/DroidPlus
-source env_variables.md
-
-.venv-teleop/bin/python scripts/run_teleop_ui.py \
-  --gripper franka \
-  --left-camera-id 31262010 \
-  --wrist-camera-id 14633207 \
-  --output-dir output_1023_4phase_sorting \
-  --port /dev/ttyACM0
