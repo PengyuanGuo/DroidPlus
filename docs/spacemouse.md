@@ -98,7 +98,7 @@ of 1 through 6.
 | `--joint-speed` | 0.3 | Maximum commanded speed per joint, rad/s |
 | `--deadzone` | 0.1 | Normalized cap input dead zone |
 | `--input-timeout` | 0.25 | Maximum active report age, seconds |
-| `--min-z` | 0.23 | Minimum end-effector height in base frame, metres |
+| `--min-z` | 0.12 | Minimum flange height in base frame, metres (Franka Hand fingertips ~0.103 m lower) |
 
 Differential IK starts at measured joints on each episode. It uses a damped
 Jacobian inverse and rejects targets outside URDF joint bounds (with a 0.01 rad

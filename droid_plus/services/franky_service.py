@@ -624,6 +624,9 @@ class AppState:
     # What the Hand is currently heading to (None = idle / unknown).
     gripper_goal_width_m: float | None = None
     gripper_last_cmd_width_m: float | None = None
+    # Last measured width. Reading the Hand blocks the whole process (~30-100 ms,
+    # GIL held), so it is refreshed only when a Move/homing ends, never polled.
+    gripper_width_m: float | None = None
     gripper_width_eps_m: float = 0.002  # ~6 bits at 80 mm
     # Follow tuning — env-overridable (GRIPPER_FOLLOW_MODE, GRIPPER_SETTLE_S,
     # GRIPPER_DEADBAND_M, GRIPPER_STOP_LEAD_M, GRIPPER_BINARY_CLOSE_FRAC/OPEN_FRAC).
@@ -695,6 +698,14 @@ def _read_gripper_width_m(gripper: object) -> float:
         except Exception:
             continue
     raise RuntimeError("unable to read Franka Hand width")
+
+
+def _measure_gripper_width_m(st: AppState, gripper: object) -> float:
+    """Read the Hand width once (blocking) and cache it."""
+    width = _read_gripper_width_m(gripper)
+    with st.gripper_lock:
+        st.gripper_width_m = width
+    return width
 
 
 def _gripper_stop_best_effort(gripper: object) -> None:
@@ -775,7 +786,7 @@ def _blocking_gripper_move(st: AppState, *, width_m: float, speed_m_s: float) ->
     try:
         _gripper_stop_best_effort(g)
         ok = bool(g.move(float(width), float(speed)))
-        measured = _read_gripper_width_m(g)
+        measured = _measure_gripper_width_m(st, g)
         with st.gripper_lock:
             st.gripper_last_cmd_width_m = float(width)
             st.gripper_last_error = None if ok else "move returned False"
@@ -821,6 +832,13 @@ def _issue_move(st: AppState, g: object, width: float, speed: float, *, preempt:
         except Exception as e:  # CommandException on preempt is expected
             err = f"{type(e).__name__}: {e}"
         finally:
+            with st.gripper_lock:
+                current = st.gripper_motion_gen == gen
+            if current:
+                try:
+                    _measure_gripper_width_m(st, g)
+                except Exception:
+                    pass
             with st.gripper_lock:
                 if st.gripper_motion_gen == gen:
                     st.gripper_busy = False
@@ -941,12 +959,14 @@ def _gripper_command_loop(*, st: AppState) -> None:
                 continue
 
             if not busy:
-                try:
-                    w = _read_gripper_width_m(g)
-                except Exception:
+                # Cached: polling the Hand here every 10 ms stalls arm control.
+                with st.gripper_lock:
+                    w = st.gripper_width_m
+                if w is None:
                     w = float(goal) if goal is not None else target
-                if abs(target - w) > deadband:
-                    # Small settled correction (e.g. stop() overshoot).
+                # Small settled correction (e.g. stop() overshoot), once per goal: a Hand
+                # blocked by a grasped object must not re-issue the same Move forever.
+                if abs(target - w) > deadband and (goal is None or abs(float(goal) - target) > eps):
                     _issue_move(st, g, target, speed, preempt=False)
         except Exception as e:
             with st.gripper_lock:
@@ -1012,6 +1032,7 @@ def _home_gripper_gello_style(st: AppState, g: object, *, force: bool) -> dict[s
             measured = None
 
         with st.gripper_lock:
+            st.gripper_width_m = measured
             st.gripper_max_width_m = float(max_w)
             st.gripper_homed = True
             st.gripper_last_error = None
@@ -1592,20 +1613,24 @@ def gripper_go_to(
 def gripper_state(
     request: Request,
     closed_threshold: int = Query(128, ge=0, le=255),
+    live: bool = Query(False),
 ) -> dict[str, Any]:
-    """Robotiq-compatible state for GripperClient / teleop observation."""
+    """Robotiq-compatible state for GripperClient / teleop observation.
+
+    Returns the width cached after the last Move/homing. ``live=true`` reads the
+    Hand instead, which blocks the whole service (arm control included) for
+    ~30-100 ms; do not poll it during teleop.
+    """
     st = _get_app_state(request)
     g = _require_gripper(st)
     with st.gripper_lock:
         busy = bool(st.gripper_busy)
         homed = bool(st.gripper_homed)
         max_w = float(st.gripper_max_width_m)
+        cached = st.gripper_width_m
 
-    # Width is read over the gripper's UDP state stream, independent of the TCP
-    # command channel, so it is safe to sample while a Move is in flight. This
-    # keeps recorded gripper observations live during motion.
     try:
-        width = _read_gripper_width_m(g)
+        width = _measure_gripper_width_m(st, g) if live or cached is None else cached
     except Exception as e:
         if busy:
             return {

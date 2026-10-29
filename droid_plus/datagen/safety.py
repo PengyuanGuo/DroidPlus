@@ -14,7 +14,7 @@ from droid_plus.analysis.end_effector_pose import compute_ee_pose
 
 # Minimum allowed EE Z height (metres, in robot base frame). Tune to sit just
 # above the table surface.
-DEFAULT_MIN_EE_Z = 0.23
+DEFAULT_MIN_EE_Z = 0.12  # flange; Franka Hand fingertips are ~0.103 m lower
 
 
 def enforce_min_z(
