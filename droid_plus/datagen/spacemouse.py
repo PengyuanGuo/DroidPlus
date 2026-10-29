@@ -97,10 +97,10 @@ class SpaceMouse:
         twist = axis_twist(axes, self.config)
         enabled = bool(buttons[self.config.enable_button])
         grip = bool(buttons[self.config.gripper_button])
-        if time.monotonic() - received > self.config.timeout:
-            if enabled or grip or np.any(twist):
-                raise RuntimeError('SpaceMouse input timed out; episode stopped')
-            return np.zeros(6), False, False
+        if time.monotonic() - received > self.config.timeout and np.any(twist):
+            # The device streams reports only while the cap is deflected, so stale
+            # motion means lost input. A held button on a centered cap sends nothing.
+            raise RuntimeError('SpaceMouse input timed out; episode stopped')
         if self.config.button_mode == 'deoxys':
             # In this mode the configured enable button acts as stop/reset.
             if enabled:

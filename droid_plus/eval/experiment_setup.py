@@ -28,7 +28,12 @@ _RESET = "\033[0m"
 # ── Cameras ──────────────────────────────────────────────────────────────────
 
 def wait_for_cameras(droid: "DroidPlus", timeout_s: float = 15.0, poll_s: float = 0.5) -> None:
-    """Poll camera_service until all cameras report ``has_frame=True``."""
+    """Poll camera_service until the cameras this run uses report ``has_frame=True``.
+
+    Cameras the service knows but the run leaves unset (e.g. ``--wrist-camera-id ''``)
+    are not waited for. With no camera ids set, all service cameras are waited for.
+    """
+    used = {str(getattr(droid, f"{role}_camera_id", "") or "") for role in ("left", "wrist", "right")} - {""}
     t0 = time.time()
     while True:
         try:
@@ -43,6 +48,8 @@ def wait_for_cameras(droid: "DroidPlus", timeout_s: float = 15.0, poll_s: float 
             continue
 
         cam_statuses = health.get("cameras", {})
+        if used:
+            cam_statuses = {cid: info for cid, info in cam_statuses.items() if str(cid) in used}
         parts = []
         errors = []
         all_ok = True

@@ -26,6 +26,36 @@ for Linux HID permissions and native HID library setup. This integration uses
 PySpaceMouse 2.1's device API and explicit `HID_Z_UP` axis convention. Driver
 requirements can differ from newer unreleased upstream code.
 
+## Quick start on the marslab workstation
+
+franky_service runs on the NUC; the workstation needs its address, a local URDF
+(the NUC's franky build has no model, so `/urdf` returns 404) and, while the wrist
+ZED is unplugged, an empty wrist camera id. Only cameras the run uses are waited for.
+
+```bash
+source env_variables.md   # NUC_IP, LEFT_CAMERA_SERIAL, ...
+export FRANKA_URDF_PATH="$PWD/models/franka_panda/panda.urdf"
+# 1. Offline: check axes/buttons, then practise on a virtual arm (no robot commands).
+.venv/bin/python scripts/record_spacemouse.py record --guided
+.venv/bin/python scripts/spacemouse_viser.py --start nuc          # open http://localhost:8080
+# 2. Dry run against the robot: reads state, sends nothing.
+.venv/bin/python scripts/run_spacemouse_cli.py --dry-run --no-record --gripper none --wrist-camera-id '' --viser
+# 3. Live.
+.venv/bin/python scripts/run_spacemouse_cli.py --gripper franka --wrist-camera-id '' --viser --task <task>
+```
+
+`--viser` serves a live 3D view at `http://localhost:8080` (`--viser-port`): the
+measured arm in grey, the commanded target in orange, an approximate Franka Hand
+whose fingers follow the gripper command, the SpaceMouse input arrow, the flange
+height floor, an EE trail, and a status panel (enable, gripper, target pose,
+height margin, measured-vs-commanded joint error). It is a kinematic skeleton; the
+local URDF has no meshes. Visualizer errors disable it without stopping control.
+
+`scripts/record_spacemouse.py record --guided` asks for one motion per robot
+direction and prints the matching `--axis-map`; `replay <csv>` runs a recording
+through the controller offline. `scripts/spacemouse_viser.py` runs the same
+controller, limits and height floor against a virtual arm.
+
 ## Panda service returns `/urdf` 404
 
 For a Franka Panda, a local arm model is provided at
@@ -76,11 +106,12 @@ margin) or below the height floor. Targets never accumulate rejected motion.
 A measured-to-commanded error over 0.15 rad ends the episode. Integration uses monotonic elapsed time. Each step is capped at 50 ms,
 and a control interval exceeding 250 ms ends the episode rather than catching up. Missing URDF/Pinocchio prevents SpaceMouse operation.
 
-Active input older than the timeout or HID read errors end the episode and invoke
-the existing robot stop method. A neutral idle device may legitimately send no
-reports, so neutral inactivity alone does not end the episode. Holding enable
-without moving can time out on devices that only report changes; release and
-restart the episode. Software stopping depends on the host and robot connection;
+Active motion older than the timeout or HID read errors end the episode and invoke
+the existing robot stop method. The SpaceMouse Compact streams about 125 reports/s
+only while the cap is deflected and sends nothing for a centered cap, even with a
+button held. Neutral inactivity, including holding enable without moving, therefore
+does not end the episode; a stale non-zero motion (for example a lost release report)
+does. Software stopping depends on the host and robot connection;
 the height check is not full arm/environment collision detection.
 
 Dry-run still reads the robot's initial joints and uses existing service/camera

@@ -35,11 +35,13 @@ def mouse_sample(axes=(0,) * 6, buttons=(0, 0), age=0):
     return mouse
 
 
-def test_stale_active_input_fails_but_idle_holds():
+def test_stale_motion_fails_but_held_buttons_hold():
     assert not mouse_sample(age=10).read()[1]
-    for mouse in [mouse_sample(buttons=(1, 0), age=10), mouse_sample(axes=(1, 0, 0, 0, 0, 0), age=10)]:
-        with pytest.raises(RuntimeError, match='timed out'):
-            mouse.read()
+    # A centered cap with a held button produces no reports; that is not stale input.
+    twist, enabled, grip = mouse_sample(buttons=(1, 1), age=10).read()
+    assert enabled and grip and not np.any(twist)
+    with pytest.raises(RuntimeError, match='timed out'):
+        mouse_sample(axes=(1, 0, 0, 0, 0, 0), buttons=(1, 0), age=10).read()
     with pytest.raises(RuntimeError, match='unavailable'):
         mouse_sample(buttons=(0,)).read()
 
@@ -113,7 +115,7 @@ def test_runner_dry_run_and_disconnect_stop(controller, monkeypatch):
     mouse.read.side_effect = RuntimeError('disconnected')
     with pytest.raises(RuntimeError, match='disconnected'):
         runner.run_spacemouse_episode(session=runner.TeleopSessionConfig(record=False), **kwargs)
-    droid.stop.assert_called_once()
+    assert droid.stop.call_count == 2  # before and after draining the target sender
 
 
 def test_uninitialized_input_cannot_arm(controller):
@@ -135,6 +137,7 @@ def test_live_runner_records_joint_targets_and_phase(controller, monkeypatch):
     droid.get_gripper_obs_value.return_value = 0.0
     recorder = Mock(episode_idx=0)
     monkeypatch.setattr(runner, 'CartesianController', lambda *args: controller)
+    start = controller.q.copy()
     result = runner.run_spacemouse_episode(
         config=EpisodeConfig(action_step_limit=2),
         session=runner.TeleopSessionConfig(rate_hz=100, record_rate_hz=100),
@@ -143,9 +146,11 @@ def test_live_runner_records_joint_targets_and_phase(controller, monkeypatch):
         should_stop=lambda: False, get_phase=lambda: 3,
     )
     assert result.seq == 2
-    assert droid.set_target_joint_state.call_count == 2
+    # Latest-value sender: up to one post per tick, starting from the measured pose.
+    assert 1 <= droid.set_target_joint_state.call_count <= 2
+    np.testing.assert_allclose(droid.set_target_joint_state.call_args_list[0].args[0], start)
     droid.gripper.close_async.assert_called_once()
-    droid.stop.assert_called_once()
+    assert droid.stop.call_count == 2
     recorded = recorder.record_step.call_args.kwargs
     assert recorded['phase_index'] == 3
     np.testing.assert_allclose(recorded['action_positions'][:7], controller.q)
@@ -240,10 +245,10 @@ def test_slow_camera_does_not_block_control_and_stop_precedes_join(controller, m
         gripper_initialized=False, pin_model=None, pin_data=None, ee_frame='tool',
         recorder=recorder, should_stop=lambda: False, get_phase=lambda: 2,
     )
-    assert result.seq == len(writes) == 1
+    assert result.seq == len(writes) >= 1
     assert writes[0]['phase_index'] == 2
     assert len(writes[0]['state_positions']) == len(writes[0]['action_positions']) == 8
-    assert droid.set_target_joint_state.call_count == 15
+    assert droid.set_target_joint_state.call_count >= 3
 
 
 def test_recording_snapshot_is_owned_and_worker_errors_surface():
@@ -307,6 +312,46 @@ def test_runner_reports_transport_latency_on_stall(controller, monkeypatch, caps
             recorder=None, should_stop=lambda: False,
         )
     output = capsys.readouterr().out
-    assert 'timing at failure' in output and 'state_get_ms' in output and 'target_post_ms' in output
-    droid.stop.assert_called_once()
-    assert droid.set_target_joint_state.call_count == 1
+    assert 'timing at failure' in output and 'state_get_ms' in output and 'target_submit_ms' in output
+    assert droid.stop.call_count == 2  # before and after draining the target sender
+    assert droid.set_target_joint_state.call_count <= 1
+
+
+def test_target_sender_tolerates_slow_start_but_stops_on_stall():
+    from droid_plus.datagen.async_target import AsyncTargetSender
+    droid = Mock()
+    droid.set_target_joint_state.side_effect = lambda *a, **k: time.sleep(.3)
+    sender = AsyncTargetSender(droid, stall_s=.1, first_stall_s=1.)
+    sender.submit(np.zeros(7), 0)
+    time.sleep(.15)
+    sender.check()  # First post may start the NUC motion slowly.
+    time.sleep(.2)
+    sender.submit(np.ones(7), 1)
+    time.sleep(.15)
+    with pytest.raises(RuntimeError, match='in flight'):
+        sender.check()
+    sender.close()
+    assert droid.set_target_joint_state.call_count == 2
+
+
+def test_target_sender_keeps_latest_surfaces_errors_and_drops_on_close():
+    from droid_plus.datagen.async_target import AsyncTargetSender
+    release = threading.Event()
+    droid = Mock()
+    droid.set_target_joint_state.side_effect = lambda *a, **k: release.wait(2)
+    sender = AsyncTargetSender(droid)
+    for seq in range(5):
+        sender.submit(np.full(7, seq), seq)
+        time.sleep(.01)
+    release.set()
+    time.sleep(.05)
+    seqs = [c.kwargs['seq'] for c in droid.set_target_joint_state.call_args_list]
+    assert seqs == [0, 4]  # Intermediate targets replaced while a post was in flight.
+    sender.close()
+    droid.set_target_joint_state.side_effect = RuntimeError('http 500')
+    sender = AsyncTargetSender(droid)
+    sender.submit(np.zeros(7), 0)
+    time.sleep(.05)
+    with pytest.raises(RuntimeError, match='post failed'):
+        sender.submit(np.zeros(7), 1)
+    sender.close()

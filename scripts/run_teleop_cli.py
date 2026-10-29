@@ -110,6 +110,9 @@ def main() -> None:
     parser.add_argument("--notes", default="", help="Free-form notes (recorded in meta.json)")
     parser.add_argument("--dry-run", action="store_true",
         help="Read controller but do not command the robot or gripper")
+    parser.add_argument("--viser", action="store_true",
+        help="SpaceMouse only: serve a live viser view of measured and commanded arm")
+    parser.add_argument("--viser-port", type=int, default=8080)
     add_controller_arguments(parser)
     args = parser.parse_args()
 
@@ -156,6 +159,11 @@ def main() -> None:
             raise RuntimeError("SpaceMouse requires a valid URDF and Pinocchio") from e
         print(f"WARNING: FK unavailable ({e}) — Z safety DISABLED")
         pin_model = pin_data = ee_frame = None
+
+    visualizer = None
+    if args.viser and args.controller == "spacemouse":
+        from droid_plus.datagen.spacemouse_viz import TeleopVisualizer
+        visualizer = TeleopVisualizer(pin_model, pin_data, ee_frame, session.min_z, port=args.viser_port)
 
     # Safety: stop before anything moves.
     try:
@@ -216,8 +224,11 @@ def main() -> None:
             base_run_dir=base_run_dir,
             stop_flag=stop_flag,
             episode_idx=episode_idx,
+            visualizer=visualizer,
         )
     finally:
+        if visualizer is not None:
+            visualizer.close()
         if args.controller == "spacemouse":
             teleop.disconnect()
         # ── Cleanup (always runs, incl. on exceptions) ───────────────────
@@ -248,6 +259,7 @@ def _episode_loop(
     base_run_dir: str | None,
     stop_flag: list[bool],
     episode_idx: int,
+    visualizer: Any = None,
 ) -> None:
     with KeyPoller() as keys:
         while not stop_flag[0]:
@@ -299,6 +311,7 @@ def _episode_loop(
             phases = PhaseSelector()
             print("[phase] Starting at 0. Keys 0–9 select phase IDs; pause ~0.5 s, press, then continue.")
             should_stop = _make_cli_should_stop(keys, stop_flag, phases)
+            extra = {"visualizer": visualizer} if args.controller == "spacemouse" else {}
             episode_runner = run_spacemouse_episode if args.controller == "spacemouse" else run_teleop_episode
             result = episode_runner(
                 config=config,
@@ -312,6 +325,7 @@ def _episode_loop(
                 recorder=recorder,
                 should_stop=should_stop,
                 get_phase=phases.get,
+                **extra,
             )
 
             duration = result.t_end - result.t_start

@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Any, Callable
 import numpy as np
 
 from droid_plus.datagen.async_recording import AsyncTeleopRecorder
+from droid_plus.datagen.async_target import AsyncTargetSender
 from droid_plus.datagen.spacemouse import CartesianController
 from droid_plus.datagen.teleop_runner import TeleopSessionConfig
 from droid_plus.eval.episode_runner import EpisodeConfig, EpisodeResult
@@ -18,6 +19,13 @@ from droid_plus.logging import EpisodeRecorder
 
 if TYPE_CHECKING:
     from droid_plus.robot import DroidPlus
+
+
+def _stop_robot(droid: "DroidPlus") -> None:
+    try:
+        droid.stop()
+    except Exception:
+        pass
 
 
 def run_spacemouse_episode(
@@ -33,11 +41,14 @@ def run_spacemouse_episode(
     recorder: EpisodeRecorder | None,
     should_stop: Callable[[], bool],
     get_phase: Callable[[], int] | None = None,
+    visualizer: Any = None,
 ) -> EpisodeResult:
     """Run a single teleop episode.
 
     Streams Cartesian SpaceMouse targets with kinematic limit checks.
-    SpaceMouse camera recording runs independently of the motion loop. Returns an :class:`EpisodeResult` with the recorder
+    SpaceMouse camera recording runs independently of the motion loop. An optional
+    ``visualizer`` (:class:`TeleopVisualizer`) is updated each tick; its failures
+    disable it but never stop control. Returns an :class:`EpisodeResult` with the recorder
     **un-finalized** (the caller finalizes after collecting labels).
     """
     if not all(np.isfinite(x) and x > 0 for x in (session.rate_hz, session.record_rate_hz)):
@@ -59,6 +70,8 @@ def run_spacemouse_episode(
     previous_tick = None
     status_time = time.monotonic()
     status_seq = 0
+    status_posts = 0
+    sender = None
     timings = {}
     previous_timings = {}
     try:
@@ -67,6 +80,11 @@ def run_spacemouse_episode(
             droid.get_current_joint_state()["positions"], teleop.config, session.min_z,
         )
         print(f"SpaceMouse XYZ+yaw ({teleop.config.button_mode}): center cap and release buttons to arm.")
+        if visualizer is not None:
+            visualizer.reset()
+        if not session.dry_run:
+            # Target posts can take tens of ms while the NUC is controlling the arm.
+            sender = AsyncTargetSender(droid)
         if recorder is not None and session.record:
             async_recorder = AsyncTeleopRecorder(
                 droid, recorder, session.record_rate_hz, session.record_jpeg_quality, gripper_initialized,
@@ -103,10 +121,10 @@ def run_spacemouse_episode(
             )
             timings["ik_ms"] = (time.monotonic() - started) * 1000
             started = time.monotonic()
-            if not session.dry_run:
-                droid.set_target_joint_state(q_franka, velocities=[0.0] * 7, seq=seq)
+            if sender is not None:
+                sender.submit(q_franka, seq)
 
-            timings["target_post_ms"] = (time.monotonic() - started) * 1000
+            timings["target_submit_ms"] = (time.monotonic() - started) * 1000
             started = time.monotonic()
 
             # Gripper — same binary open/close as policy rollout.
@@ -128,17 +146,28 @@ def run_spacemouse_episode(
                             gripper_cmd_frac = last_gripper_cmd
 
             timings["gripper_ms"] = (time.monotonic() - started) * 1000
+            if visualizer is not None:
+                try:
+                    visualizer.update(
+                        target=q_franka, twist=twist, enabled=enabled, gripper_closed=cartesian.closed,
+                        status=cartesian.status, measured=js_control["positions"],
+                    )
+                except Exception as exc:
+                    print(f"[viser] visualizer disabled: {exc}", flush=True)
+                    visualizer = None
             if async_recorder is not None:
                 async_recorder.submit(js_control, q_franka, gripper_cmd_frac, phase_index, t0)
             now = time.monotonic()
             if now - status_time >= 1.0:
                 actual_hz = (seq + 1 - status_seq) / (now - status_time)
                 record_hz = async_recorder.actual_rate if async_recorder is not None else 0.0
+                posts, slowest_post_ms = sender.take_stats() if sender is not None else (0, 0.0)
                 print(f"[spacemouse] {cartesian.status}; enable={enabled} "
                       f"xyz={np.round(twist[:3], 3)} yaw={twist[5]:.3f}; "
-                      f"control={actual_hz:.1f}Hz record={record_hz:.1f}Hz; "
+                      f"control={actual_hz:.1f}Hz record={record_hz:.1f}Hz "
+                      f"posts={posts - status_posts}/s slowest_post_ms={slowest_post_ms:.1f}; "
                       + " ".join(f"{key}={value:.1f}" for key, value in timings.items()), flush=True)
-                status_time, status_seq = now, seq + 1
+                status_time, status_seq, status_posts = now, seq + 1, posts
 
             seq += 1
 
@@ -153,10 +182,11 @@ def run_spacemouse_episode(
         raise
     finally:
         if not session.dry_run:
-            try:
-                droid.stop()
-            except Exception:
-                pass
+            _stop_robot(droid)
+            if sender is not None:
+                # A post finishing after the first stop would unlatch it; stop again once drained.
+                sender.close()
+                _stop_robot(droid)
 
         if async_recorder is not None:
             async_recorder.close()
