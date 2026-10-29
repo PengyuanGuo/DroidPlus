@@ -85,3 +85,21 @@ def test_idle_follow_loop_does_not_poll_or_repress_grasped_object(service):
     assert g.moves == [0.0]  # One close; no repeated Moves against the object.
     assert g.reads <= 2  # Refresh after the Move, not every 10 ms.
     assert st.gripper_width_m == pytest.approx(0.03)
+
+
+def test_control_loop_survives_failed_recovery_and_reports_heartbeat(service):
+    class FailingRobot:
+        def recover_from_errors(self):
+            raise RuntimeError("FCI not active")
+
+    st = make_state(service, None)
+    st.robot = FailingRobot()
+    st.control_thread = threading.Thread(target=service._control_loop,
+                                         kwargs={"st": st, "control_hz": 100, "timeout_s": 1.0}, daemon=True)
+    st.control_thread.start()
+    time.sleep(0.1)
+    health = service.health(request_for(st))
+    assert health["control_thread_alive"] and health["control_heartbeat_age_s"] < 0.5
+    assert "FCI not active" in health["last_control_error"]
+    st.shutdown.set()
+    st.control_thread.join(1)

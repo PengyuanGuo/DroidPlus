@@ -355,3 +355,21 @@ def test_target_sender_keeps_latest_surfaces_errors_and_drops_on_close():
     with pytest.raises(RuntimeError, match='post failed'):
         sender.submit(np.zeros(7), 1)
     sender.close()
+
+
+@pytest.mark.parametrize('health, ok', [
+    ({'control_thread_alive': True, 'control_heartbeat_age_s': 0.02}, True),
+    ({}, True),  # Older franky_service without liveness fields.
+    ({'control_thread_alive': False, 'control_heartbeat_age_s': None}, False),
+    ({'control_thread_alive': True, 'control_heartbeat_age_s': 5.0}, False),
+    ({'control_thread_alive': True, 'control_heartbeat_age_s': None}, False),
+])
+def test_live_episode_requires_running_nuc_control_loop(health, ok):
+    from droid_plus.datagen import spacemouse_runner as runner
+    droid = Mock()
+    droid.robot.health.return_value = health
+    if ok:
+        runner._require_robot_control(droid)
+    else:
+        with pytest.raises(RuntimeError, match='control loop is not running'):
+            runner._require_robot_control(droid)

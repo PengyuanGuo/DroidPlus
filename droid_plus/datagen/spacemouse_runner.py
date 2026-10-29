@@ -28,6 +28,19 @@ def _stop_robot(droid: "DroidPlus") -> None:
         pass
 
 
+def _require_robot_control(droid: "DroidPlus") -> None:
+    """Refuse to start when franky_service accepts targets but its control loop is not running."""
+    health = droid.robot.health()
+    alive = health.get("control_thread_alive")
+    age = health.get("control_heartbeat_age_s")
+    stale = isinstance(age, (int, float)) and age > 1.0
+    if alive is False or stale or (alive is True and age is None):
+        raise RuntimeError(
+            f"franky_service control loop is not running (alive={alive}, heartbeat age={age}, "
+            f"last error={health.get('last_control_error')}). Clear robot errors / activate FCI "
+            "in Desk, then restart franky_service on the NUC.")
+
+
 def run_spacemouse_episode(
     *,
     config: EpisodeConfig,
@@ -75,6 +88,8 @@ def run_spacemouse_episode(
     timings = {}
     previous_timings = {}
     try:
+        if not session.dry_run:
+            _require_robot_control(droid)
         cartesian = CartesianController(
             pin_model, pin_data, ee_frame,
             droid.get_current_joint_state()["positions"], teleop.config, session.min_z,

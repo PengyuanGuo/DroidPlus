@@ -603,6 +603,7 @@ class AppState:
     # Diagnostic snapshots are replaced atomically; no extra control locks.
     target_timing: dict[str, Any] = field(default_factory=dict)
     control_timing: dict[str, Any] = field(default_factory=dict)
+    control_heartbeat_s: float = 0.0  # wall time of the control loop's last iteration
     # Franka Hand (optional; shares robot IP, separate libfranka connection).
     # Homing follows GELLO (home once, Move-only, no Grasp). Streaming does NOT:
     # see _gripper_command_loop for why (Move is point-to-point; every retarget
@@ -1085,53 +1086,61 @@ def _control_loop(*, st: AppState, control_hz: int, timeout_s: float) -> None:
 
     robot = st.robot
     assert robot is not None
-    robot.recover_from_errors()
+    # Must not raise: a dead control thread leaves HTTP accepting targets that never move the arm.
+    _try_recover_from_errors(st=st, context="control_loop_start")
 
     while not st.shutdown.is_set():
-        time.sleep(period_s)
+        try:
+            time.sleep(period_s)
+            st.control_heartbeat_s = time.time()
 
-        with st.lock:
-            latest = st.latest_target
-            stop_latched = st.stop_latched
-            timeout_s = st.command_timeout_s
+            with st.lock:
+                latest = st.latest_target
+                stop_latched = st.stop_latched
+                timeout_s = st.command_timeout_s
 
-        if stop_latched or latest is None:
-            continue
+            if stop_latched or latest is None:
+                continue
 
-        age_s = time.time() - latest.accepted_timestamp_s
-        if age_s > timeout_s:
+            age_s = time.time() - latest.accepted_timestamp_s
+            if age_s > timeout_s:
+                try:
+                    robot.move(franky.JointStopMotion())
+                except Exception as e:
+                    st.last_control_error = f"{type(e).__name__}: {e}"
+                    _try_recover_from_errors(st=st, context="timeout_stop", exc=e)
+                finally:
+                    with st.lock:
+                        st.stop_latched = True
+                        st.latest_target = None
+                continue
+
             try:
-                robot.move(franky.JointStopMotion())
+                target = franky.JointState(latest.positions, latest.velocities)
+                # Keep holding the last target until preempted (better streaming behavior).
+                motion = franky.JointMotion(target)
+                move_started = time.monotonic()
+                st.control_timing = {"seq": latest.seq, "in_move": True, "started_wall_s": time.time()}
+                try:
+                    robot.move(motion, asynchronous=True)
+                finally:
+                    st.control_timing = {
+                        "seq": latest.seq, "in_move": False,
+                        "move_ms": (time.monotonic() - move_started) * 1000,
+                        "finished_wall_s": time.time(),
+                    }
+                st.last_control_error = None
             except Exception as e:
                 st.last_control_error = f"{type(e).__name__}: {e}"
-                _try_recover_from_errors(st=st, context="timeout_stop", exc=e)
-            finally:
+                _try_recover_from_errors(st=st, context="move_joint_motion", exc=e)
                 with st.lock:
                     st.stop_latched = True
                     st.latest_target = None
-            continue
-
-        try:
-            target = franky.JointState(latest.positions, latest.velocities)
-            # Keep holding the last target until preempted (better streaming behavior).
-            motion = franky.JointMotion(target)
-            move_started = time.monotonic()
-            st.control_timing = {"seq": latest.seq, "in_move": True, "started_wall_s": time.time()}
-            try:
-                robot.move(motion, asynchronous=True)
-            finally:
-                st.control_timing = {
-                    "seq": latest.seq, "in_move": False,
-                    "move_ms": (time.monotonic() - move_started) * 1000,
-                    "finished_wall_s": time.time(),
-                }
-            st.last_control_error = None
-        except Exception as e:
+        except Exception as e:  # Keep the loop alive; report and retry next period.
             st.last_control_error = f"{type(e).__name__}: {e}"
-            _try_recover_from_errors(st=st, context="move_joint_motion", exc=e)
-            with st.lock:
-                st.stop_latched = True
-                st.latest_target = None
+            LOG.exception("control loop iteration failed")
+            time.sleep(period_s)
+
 
 
 @asynccontextmanager
@@ -1261,6 +1270,9 @@ def health(request: Request):
         "target_timing": current_app_state.target_timing,
         "control_timing": current_app_state.control_timing,
         "robot_connected": current_app_state.robot is not None,
+        "control_thread_alive": bool(current_app_state.control_thread and current_app_state.control_thread.is_alive()),
+        "control_heartbeat_age_s": (time.time() - current_app_state.control_heartbeat_s
+                                    if current_app_state.control_heartbeat_s else None),
         "stop_latched": current_app_state.stop_latched,
         "has_target": current_app_state.latest_target is not None,
         "last_control_error": current_app_state.last_control_error,
