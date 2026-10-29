@@ -1,181 +1,127 @@
 # SpaceMouse teleoperation
 
-Control the Franka with a USB SpaceMouse instead of the SO-101 leader arm.
-Motion is restricted to XYZ translation and yaw about the robot base Z axis.
-Roll and pitch input are ignored; the controller maintains the starting tilt.
-Both existing entry points accept `--controller spacemouse`; SO-101 remains
-the default. Recordings retain the existing joint action/state format, cameras,
-episode labels, and phase annotations. Metadata identifies `teleop_spacemouse`
-and stores the controller settings.
+Drive the Franka Panda with a USB SpaceMouse (tested: SpaceMouse Compact) instead of
+the SO-101 leader arm. The SpaceMouse commands end-effector **XYZ translation and yaw**
+in the robot base frame; roll/pitch are held at the starting tilt. Differential IK on
+the workstation turns this into joint targets streamed to the existing
+`franky_service` on the NUC, so recordings use the same 8-D joint+gripper
+state/action format, cameras, labels and phase annotations as SO-101 teleop
+(`meta.json` policy `teleop_spacemouse`).
 
-From the repository directory, install in your robot workstation environment:
+## Status (2026-10-29)
+
+| Area | State |
+| --- | --- |
+| Arm teleop, live | Working: ~99 Hz control, 4–10 ms NUC round trips, with and without the Franka Hand connected |
+| Recording | Working: 15 Hz, left camera (wrist ZED currently unplugged) |
+| Axis mapping | Verified on the rig: default `--axis-map=1,2,3,4,5,6` is correct |
+| Gripper toggle | Not yet exercised live |
+| Known issue | One `franky_service` hang during Hand `/connect`; restart cleared it (see Troubleshooting) |
+
+## Setup
+
+**Workstation** (SpaceMouse plugged in here): use `.venv`, which has `pyspacemouse`,
+`pinocchio` and `viser` (`pip install -e '.[spacemouse,analysis]'`). For HID permissions
+see the [PySpaceMouse docs](https://spacemouse.kubaandrysek.cz/).
 
 ```bash
-pip install -e '.[spacemouse,analysis]'
-python scripts/run_teleop_cli.py --controller spacemouse --dry-run --no-record --gripper none
-python scripts/run_teleop_ui.py --controller spacemouse --dry-run --gripper none
+source env_variables.md                                     # NUC_IP, camera serials
+export FRANKA_URDF_PATH="$PWD/models/franka_panda/panda.urdf"  # NUC franky build has no /urdf
 ```
 
-The SpaceMouse plugs into the computer running the Python entry point, including
-when using the web UI from another computer. Select a model explicitly with
-`--spacemouse-device 'SpaceMouse Compact'`, or leave it unset for auto-detection.
-The SpaceMouse extra does not require LeRobot.
+The arm is a **Panda** (the service docstring says FR3; ignore that), so the local
+Panda URDF is correct. It ends at the flange (`panda_link8`).
 
-Use the [PySpaceMouse installation instructions](https://spacemouse.kubaandrysek.cz/)
-for Linux HID permissions and native HID library setup. This integration uses
-PySpaceMouse 2.1's device API and explicit `HID_Z_UP` axis convention. Driver
-requirements can differ from newer unreleased upstream code.
-
-## Quick start on the marslab workstation
-
-franky_service runs on the NUC; the workstation needs its address, a local URDF
-(the NUC's franky build has no model, so `/urdf` returns 404) and, while the wrist
-ZED is unplugged, an empty wrist camera id. Only cameras the run uses are waited for.
+**NUC**: run `franky_service` from this repo in the `droidplus` conda env. Before
+starting it, stop any old instance; otherwise it fails with `[Errno 98] address
+already in use` and the old code keeps serving.
 
 ```bash
-source env_variables.md   # NUC_IP, LEFT_CAMERA_SERIAL, ...
-export FRANKA_URDF_PATH="$PWD/models/franka_panda/panda.urdf"
-# 1. Offline: check axes/buttons, then practise on a virtual arm (no robot commands).
+ss -ltnp 'sport = :54321'     # find the old PID, then kill it
+make franky_service           # keep your usual env vars, e.g. FRANKY_ROBOT_IP
+```
+
+`FRANKA_GRIPPER` defaults to `1`. To check the new service is live from the workstation:
+`curl -s http://$NUC_IP:54321/openapi.json | grep -c '"live"'` must print at least 1.
+
+## Workflow
+
+```bash
+# 1. Check axes and buttons (no robot): prints the --axis-map for where you stand
 .venv/bin/python scripts/record_spacemouse.py record --guided
-.venv/bin/python scripts/spacemouse_viser.py --start nuc          # open http://localhost:8080
-# 2. Dry run against the robot: reads state, sends nothing.
+# 2. Practise on a virtual arm in viser, starting from the robot's pose (read-only)
+.venv/bin/python scripts/spacemouse_viser.py --start nuc                  # http://localhost:8080
+# 3. Dry run: reads robot state, sends no commands
 .venv/bin/python scripts/run_spacemouse_cli.py --dry-run --no-record --gripper none --wrist-camera-id '' --viser
-# 3. Live.
+# 4. Live, recording
 .venv/bin/python scripts/run_spacemouse_cli.py --gripper franka --wrist-camera-id '' --viser --task <task>
 ```
 
-`--viser` serves a live 3D view at `http://localhost:8080` (`--viser-port`): the
-measured arm in grey, the commanded target in orange, an approximate Franka Hand
-whose fingers follow the gripper command, the SpaceMouse input arrow, the flange
-height floor, an EE trail, and a status panel (enable, gripper, target pose,
-height margin, measured-vs-commanded joint error). It is a kinematic skeleton; the
-local URDF has no meshes. Visualizer errors disable it without stopping control.
+`run_teleop_cli.py` / `run_teleop_ui.py --controller spacemouse` also work (the UI has no `--viser`).
+`--wrist-camera-id ''` skips the unplugged wrist camera; only cameras in use are waited for.
 
-`scripts/record_spacemouse.py record --guided` asks for one motion per robot
-direction and prints the matching `--axis-map`; `replay <csv>` runs a recording
-through the controller offline. `scripts/spacemouse_viser.py` runs the same
-controller, limits and height floor against a virtual arm.
+## Controls (default `--button-mode clutch`)
 
-## Panda service returns `/urdf` 404
+1. SPACE starts an episode. Center the cap and release both buttons to arm.
+2. **Hold button 0** and push/pull the cap to translate, twist it for yaw. Release to hold the pose.
+3. **While holding button 0, tap button 1** to toggle the gripper (close, then open).
+4. ESC ends the episode; then answer the valid/success/score/notes prompts.
 
-For a Franka Panda, a local arm model is provided at
-[`models/franka_panda/panda.urdf`](../models/franka_panda/panda.urdf).
-From the DroidPlus directory, set this before running either entry point:
+Speed scales with cap deflection. Alternative `--button-mode deoxys --gripper-button 0
+--enable-button 1`: free motion after arming, hold left button to close, right button stops.
 
-```bash
-export FRANKA_URDF_PATH="$PWD/models/franka_panda/panda.urdf"
-```
-
-This bypasses the HTTP model lookup. The model ends at the Panda flange
-(`panda_link8`); it does not include gripper/tool offsets. The height floor applies
-to that flange. See [model provenance](../models/franka_panda/README.md).
-Do not use this Panda model for an FR3.
-
-## Controls
-
-1. Start an episode using the usual CLI or web UI controls.
-2. Center the cap and release both buttons to arm. If necessary, move and release
-   the cap once to produce an initial HID report.
-3. Hold button 0 to enable motion. Push/pull the cap for translation; twist for yaw. Tilting the cap does not
-   command roll or pitch. Release button 0 to hold the last commanded pose.
-4. While holding button 0, press button 1 to toggle the gripper. The first press
-   requests close, the next requests open. Button indices are zero-based and
-   configurable with `--enable-button` and `--gripper-button`.
-5. Stop the episode with the existing ESC or web UI stop control.
-
-Motion is expressed in the **robot base frame**, using the EE frame selected
-from the existing URDF loader (printed at startup, commonly `panda_link8`).
-The default maps driver x/y/z/yaw to base x/y/z/rz. After axis remapping,
-roll and pitch are suppressed. Inspect axis
-orientation on your setup before live operation; `--axis-map=-2,1,3,-5,4,6`
-shows how to swap axes and invert signs. Values must form a signed permutation
-of 1 through 6.
+## Limits and safety
 
 | Option | Default | Meaning |
 | --- | --- | --- |
-| `--linear-speed` | 0.05 | Maximum translation vector norm, m/s |
-| `--angular-speed` | 0.3 | Maximum rotation vector norm, rad/s |
-| `--joint-speed` | 0.3 | Maximum commanded speed per joint, rad/s |
-| `--deadzone` | 0.1 | Normalized cap input dead zone |
-| `--input-timeout` | 0.25 | Maximum active report age, seconds |
-| `--min-z` | 0.12 | Minimum flange height in base frame, metres (Franka Hand fingertips ~0.103 m lower) |
+| `--linear-speed` | 0.10 m/s | Max translation speed |
+| `--angular-speed` | 0.3 rad/s | Max yaw rate |
+| `--joint-speed` | 0.5 rad/s | Per-joint cap (10 cm/s needs up to ~0.34 near home) |
+| `--min-z` | 0.12 m | Flange height floor; Franka Hand fingertips are ~0.103 m lower (shared default with SO-101) |
+| `--deadzone` | 0.1 | Cap dead zone |
+| `--input-timeout` | 0.25 s | Max age of active (non-zero) input |
+| `--axis-map` | `1,2,3,4,5,6` | Signed permutation: device x,y,z,roll,pitch,yaw to base x,y,z,rx,ry,rz |
 
-Differential IK starts at measured joints on each episode. It uses a damped
-Jacobian inverse and rejects targets outside URDF joint bounds (with a 0.01 rad
-margin) or below the height floor. Targets never accumulate rejected motion.
-A measured-to-commanded error over 0.15 rad ends the episode. Integration uses monotonic elapsed time. Each step is capped at 50 ms,
-and a control interval exceeding 250 ms ends the episode rather than catching up. Missing URDF/Pinocchio prevents SpaceMouse operation.
+The episode stops (robot stop is sent) on any of these:
 
-Active motion older than the timeout or HID read errors end the episode and invoke
-the existing robot stop method. The SpaceMouse Compact streams about 125 reports/s
-only while the cap is deflected and sends nothing for a centered cap, even with a
-button held. Neutral inactivity, including holding enable without moving, therefore
-does not end the episode; a stale non-zero motion (for example a lost release report)
-does. Software stopping depends on the host and robot connection;
-the height check is not full arm/environment collision detection.
+- Stale non-zero input or a SpaceMouse read error. A held button on a centered cap
+  sends no reports and is fine.
+- A control interval over 250 ms.
+- A target post in flight for over 0.5 s (2 s for the first post).
+- A joint tracking error over 0.15 rad.
 
-Dry-run still reads the robot's initial joints and uses existing service/camera
-connections, but sends no arm, gripper, or startup stop commands. It integrates
-virtual targets for checking mappings and recording; it is not a physics simulator.
-Remove `--dry-run` for live control after validating the setup. No real robot or
-SpaceMouse was used for the automated tests.
+IK rejects targets beyond URDF joint limits (0.01 rad margin) or below `--min-z`, and
+the status shows `target rejected`. The height floor is not collision checking.
 
-## Independent recording and diagnostics
+## How it works
 
-For SpaceMouse episodes, camera acquisition and recording run in a separate
-worker. The control loop publishes one latest snapshot containing measured
-joints, the accepted joint target, gripper command, phase and wall timestamp.
-The worker samples the latest snapshot before requesting images. Slow cameras
-reduce recording throughput without blocking motion or building a stale queue.
-Images are fetched sequentially; the timestamp identifies the control snapshot,
-not a hardware-synchronized camera exposure. Gripper observations are read by
-the recording worker. This preserves the existing eight-element state/action
-schema (seven joints plus gripper), with zero action velocities as before.
+| File | Role |
+| --- | --- |
+| `droid_plus/datagen/spacemouse.py` | HID reader thread, axis mapping, damped-least-squares IK (`CartesianController`) |
+| `droid_plus/datagen/spacemouse_runner.py` | Episode loop: 100 Hz control, recording, viser, diagnostics |
+| `droid_plus/datagen/async_target.py` | Posts the latest joint target from a worker; control never waits on HTTP |
+| `droid_plus/datagen/async_recording.py` | Camera and state recording worker (latest snapshot, no queue) |
+| `droid_plus/datagen/spacemouse_viz.py` | `--viser` view: measured arm (grey), target (orange), Hand, input arrow, floor, status |
+| `scripts/record_spacemouse.py` | Record raw input / guided axis check / offline `replay` through the IK |
+| `scripts/spacemouse_viser.py` | Virtual-arm simulator; never commands the robot |
 
-Robot stop is requested before joining the recording worker, and finalization
-waits for any in-flight frame. Worker errors stop the episode. Metadata reports
-measured recording rate for these episodes rather than nominal tick decimation.
+The status line prints once per second: controller state, `control` Hz, `record` Hz,
+`posts/s`, `slowest_post_ms`, `state_get_ms`. Healthy values are about 99 Hz,
+15 Hz, ~100/s, under 10 ms and about 5 ms.
 
-Once per second, `[spacemouse]` prints the arm/hold/rejection status, mapped XYZ
-and yaw input, enable state, and measured control/recording rates. A height or
-joint-limit rejection is explicit. NUC code and its joint-target API are unchanged.
+**NUC gripper note:** reading the Franka Hand width blocks the whole `franky_service`
+process for 30–100 ms. The service therefore caches the width after each Move or
+homing, and never polls it. `/gripper_state` returns the cached value; `?live=true`
+forces a read, so don't use that during teleop. Recorded gripper observations update
+after each Move finishes.
 
-## Optional Deoxys-style buttons
+## Troubleshooting
 
-The default `--button-mode clutch` still requires holding button 0 to move and
-uses button 1 to toggle the gripper. To use free motion after arming, left-button
-hold-to-close/release-to-open, and right-button stop:
-
-```bash
-.venv/bin/python scripts/run_teleop_cli.py \
-  --controller spacemouse --gripper franka --task spacemouse_teleop \
-  --button-mode deoxys --gripper-button 0 --enable-button 1
-```
-
-Center the cap and release buttons at episode start. In this mode you do not
-hold an enable button during motion. The right button ends the episode; it does
-not move the robot to a reset pose. Button indices can be swapped if your device
-reports them differently. This changes input behavior only, not the NUC backend.
-
-## Isolated runner and latency debugging
-
-SpaceMouse episodes execute in `droid_plus/datagen/spacemouse_runner.py`.
-`teleop_runner.py` retains the original SO-101 episode loop; it does not import
-or branch on SpaceMouse. Both existing CLI/UI entry points select the appropriate
-runner. Session configuration and recording finalization remain shared.
-
-A dedicated CLI is also available, with the same options except `--controller`:
-
-```bash
-export FRANKA_URDF_PATH="$PWD/models/franka_panda/panda.urdf"
-.venv/bin/python scripts/run_spacemouse_cli.py \
-  --gripper franka --task spacemouse_teleop --rate-hz 50
-```
-
-For read-only timing investigation, add `--dry-run --no-record --gripper none`.
-Dry-run measures state reads and IK but does not measure live target-post latency.
-Periodic diagnostics show `state_get_ms`, `input_ms`, `ik_ms`, `target_post_ms`,
-`gripper_ms`, and `interval_ms`. On failure the current and previous tick timings
-are printed before cleanup. These distinguish robot-service/HTTP delays from
-input or IK delays. The 250 ms control-stall stop is unchanged; separation alone
-does not resolve a slow connection or robot service.
+| Symptom | Cause / fix |
+| --- | --- |
+| `Connection refused` to `localhost:54321` | `NUC_IP` unset: `source env_variables.md` |
+| `SpaceMouse requires a valid URDF` | `export FRANKA_URDF_PATH=...panda.urdf` |
+| 15 s camera wait | Pass `--wrist-camera-id ''` for unplugged cameras |
+| Control ~9 Hz, `state_get_ms` ~200 with `--gripper franka` | NUC runs the old service (no width cache): restart it from this repo |
+| `Read timed out` on `/connect`, then every endpoint times out | `franky_service` hung (seen once during Hand connect). On the NUC run `py-spy dump --pid <PID>` to capture where it is stuck, then `kill -9` and restart |
+| Arm doesn't follow the cap | Button 0 must be held (clutch mode) |

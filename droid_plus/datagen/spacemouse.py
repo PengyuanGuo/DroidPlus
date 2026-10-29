@@ -11,9 +11,9 @@ import numpy as np
 
 @dataclass(frozen=True)
 class SpaceMouseConfig:
-    linear_speed: float = 0.05  # m/s, vector norm
+    linear_speed: float = 0.10  # m/s, vector norm
     angular_speed: float = 0.3  # rad/s, vector norm
-    joint_speed: float = 0.3  # rad/s per joint
+    joint_speed: float = 0.5  # rad/s per joint; 10 cm/s needs up to ~0.34 near home
     deadzone: float = 0.1
     timeout: float = 0.25
     button_mode: str = "clutch"
@@ -213,9 +213,9 @@ def add_controller_arguments(parser: argparse.ArgumentParser):
                         help='clutch: hold enable to move; deoxys: move freely, enable button stops, hold gripper button to close')
     parser.add_argument('--controller', choices=['so101', 'spacemouse'], default='so101')
     parser.add_argument('--spacemouse-device', help='PySpaceMouse device name (default: auto-detect)')
-    parser.add_argument('--linear-speed', type=float, default=0.05, help='SpaceMouse translation limit, m/s')
+    parser.add_argument('--linear-speed', type=float, default=0.10, help='SpaceMouse translation limit, m/s')
     parser.add_argument('--angular-speed', type=float, default=0.3, help='SpaceMouse rotation limit, rad/s')
-    parser.add_argument('--joint-speed', type=float, default=0.3, help='SpaceMouse joint speed limit, rad/s')
+    parser.add_argument('--joint-speed', type=float, default=0.5, help='SpaceMouse joint speed limit, rad/s')
     parser.add_argument('--deadzone', type=float, default=0.1)
     parser.add_argument('--input-timeout', type=float, default=0.25)
     parser.add_argument('--enable-button', type=int, default=0, help='Hold to enable motion (zero-based)')

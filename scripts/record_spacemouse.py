@@ -326,9 +326,9 @@ def main():
     for p in (rec, rep):
         p.add_argument("--rate-hz", type=float, default=100.0)
         p.add_argument("--button-mode", choices=["clutch", "deoxys"], default="clutch")
-        p.add_argument("--linear-speed", type=float, default=0.05)
+        p.add_argument("--linear-speed", type=float, default=0.10)
         p.add_argument("--angular-speed", type=float, default=0.3)
-        p.add_argument("--joint-speed", type=float, default=0.3)
+        p.add_argument("--joint-speed", type=float, default=0.5)
         p.add_argument("--deadzone", type=float, default=0.1)
         p.add_argument("--enable-button", type=int, default=0)
         p.add_argument("--gripper-button", type=int, default=1)
