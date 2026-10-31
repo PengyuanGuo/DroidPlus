@@ -1,0 +1,12 @@
+re-run model:
+.venv-molmo/bin/python scripts/annotate_sorting_points_correction.py \
+  --image "$EP/molmo_previews/segment_04.jpg" \
+  --segment 4 \
+  --atomic-policy-root "$ATOMIC_POLICY_ROOT" \
+  --device cuda:0
+ 
+mannully:
+.venv-molmo/bin/python scripts/annotate_sorting_points_manual.py \
+  --image "$EP/molmo_previews/segment_04.jpg" \
+  --segment 4 \
+  --port 8765
