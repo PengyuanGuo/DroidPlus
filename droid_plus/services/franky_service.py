@@ -74,6 +74,14 @@ DEFAULT_SERVICE_PORT = 54321
 
 EFFECTIVE_FLOAT_INF_SECONDS = 1_000_000 # This is about 2 weeks
 
+# Franky deadlock mitigation (ABBA between move() preemption and the libfranka
+# callback; widened by concurrent state reads). Only the control thread touches
+# the robot during streaming; HTTP reads a cache it refreshes every tick.
+TARGET_RESEND_EPS_RAD = 1e-4  # skip move() when the target moved less than this
+TARGET_RESEND_S = 0.25  # but re-send an unchanged target at least this often
+JOINT_STATE_CACHE_MAX_AGE_S = 0.1  # older cache -> /joint_state reads the robot itself
+ROBOT_LOCK_TIMEOUT_S = 0.2  # HTTP handlers never wait longer than this for the robot
+
 # Joint-space \"home\" pose (matches `franky_client.HOME_POSITION`).
 HOME_POSITION: list[float] = [0.0, -0.40, 0.0, -1.9, 0.0, 1.5, 0.0]
 
@@ -604,6 +612,13 @@ class AppState:
     target_timing: dict[str, Any] = field(default_factory=dict)
     control_timing: dict[str, Any] = field(default_factory=dict)
     control_heartbeat_s: float = 0.0  # wall time of the control loop's last iteration
+    # Serializes every franky Robot call (move/state/recover). Reentrant because
+    # recovery runs from inside locked sections.
+    robot_lock: threading.RLock = field(default_factory=threading.RLock)
+    # Latest measured joint state from the control thread: (positions, velocities, wall_s).
+    joint_state_cache: tuple[list[float], list[float], float] | None = None
+    # Last target actually passed to robot.move(): (positions, velocities, monotonic_s).
+    last_sent: tuple[np.ndarray, np.ndarray, float] | None = None
     # Franka Hand (optional; shares robot IP, separate libfranka connection).
     # Homing follows GELLO (home once, Move-only, no Grasp). Streaming does NOT:
     # see _gripper_command_loop for why (Move is point-to-point; every retarget
@@ -1080,62 +1095,100 @@ def _try_recover_from_errors(*, st: AppState, context: str, exc: Exception | Non
             st.last_control_error = (f"{base} | {extra}" if base else extra)
 
 
+def _read_joint_state(robot: object) -> tuple[list[float], list[float]]:
+    js = getattr(robot, "current_joint_state")
+    return _to_float_list(js.position), _to_float_list(js.velocity)
+
+
+def _should_send(st: AppState, latest: LatestTarget, now: float) -> bool:
+    """Only preempt the running motion when the target changed or the resend period passed."""
+    if st.last_sent is None:
+        return True
+    q, dq, sent_at = st.last_sent
+    if now - sent_at >= TARGET_RESEND_S:
+        return True
+    return bool(
+        np.max(np.abs(np.asarray(latest.positions) - q)) > TARGET_RESEND_EPS_RAD
+        or np.max(np.abs(np.asarray(latest.velocities) - dq)) > TARGET_RESEND_EPS_RAD
+    )
+
+
 def _control_loop(*, st: AppState, control_hz: int, timeout_s: float) -> None:
-    """Apply latest target at a fixed rate using Franky JointMotion(JointState(...))."""
+    """Apply latest target at a fixed rate using Franky JointMotion(JointState(...)).
+
+    This is the only thread that calls the robot during streaming: it also refreshes
+    ``st.joint_state_cache`` each tick so HTTP readers never touch franky concurrently.
+    """
     period_s = 1.0 / float(control_hz)
 
     robot = st.robot
     assert robot is not None
     # Must not raise: a dead control thread leaves HTTP accepting targets that never move the arm.
-    _try_recover_from_errors(st=st, context="control_loop_start")
+    with st.robot_lock:
+        _try_recover_from_errors(st=st, context="control_loop_start")
 
     while not st.shutdown.is_set():
         try:
             time.sleep(period_s)
             st.control_heartbeat_s = time.time()
 
-            with st.lock:
-                latest = st.latest_target
-                stop_latched = st.stop_latched
-                timeout_s = st.command_timeout_s
-
-            if stop_latched or latest is None:
-                continue
-
-            age_s = time.time() - latest.accepted_timestamp_s
-            if age_s > timeout_s:
+            with st.robot_lock:
                 try:
-                    robot.move(franky.JointStopMotion())
+                    positions, velocities = _read_joint_state(robot)
+                    st.joint_state_cache = (positions, velocities, time.time())
+                except Exception:  # Stale cache makes /joint_state fall back to a direct read.
+                    LOG.debug("joint_state read failed", exc_info=True)
+
+                with st.lock:
+                    latest = st.latest_target
+                    stop_latched = st.stop_latched
+                    timeout_s = st.command_timeout_s
+
+                if stop_latched or latest is None:
+                    st.last_sent = None
+                    continue
+
+                age_s = time.time() - latest.accepted_timestamp_s
+                if age_s > timeout_s:
+                    try:
+                        robot.move(franky.JointStopMotion())
+                    except Exception as e:
+                        st.last_control_error = f"{type(e).__name__}: {e}"
+                        _try_recover_from_errors(st=st, context="timeout_stop", exc=e)
+                    finally:
+                        st.last_sent = None
+                        with st.lock:
+                            st.stop_latched = True
+                            st.latest_target = None
+                    continue
+
+                move_started = time.monotonic()
+                if not _should_send(st, latest, move_started):
+                    continue
+
+                try:
+                    target = franky.JointState(latest.positions, latest.velocities)
+                    # Keep holding the last target until preempted (better streaming behavior).
+                    motion = franky.JointMotion(target)
+                    st.control_timing = {"seq": latest.seq, "in_move": True, "started_wall_s": time.time()}
+                    try:
+                        robot.move(motion, asynchronous=True)
+                    finally:
+                        st.control_timing = {
+                            "seq": latest.seq, "in_move": False,
+                            "move_ms": (time.monotonic() - move_started) * 1000,
+                            "finished_wall_s": time.time(),
+                        }
+                    st.last_sent = (np.asarray(latest.positions, dtype=float),
+                                    np.asarray(latest.velocities, dtype=float), move_started)
+                    st.last_control_error = None
                 except Exception as e:
                     st.last_control_error = f"{type(e).__name__}: {e}"
-                    _try_recover_from_errors(st=st, context="timeout_stop", exc=e)
-                finally:
+                    st.last_sent = None
+                    _try_recover_from_errors(st=st, context="move_joint_motion", exc=e)
                     with st.lock:
                         st.stop_latched = True
                         st.latest_target = None
-                continue
-
-            try:
-                target = franky.JointState(latest.positions, latest.velocities)
-                # Keep holding the last target until preempted (better streaming behavior).
-                motion = franky.JointMotion(target)
-                move_started = time.monotonic()
-                st.control_timing = {"seq": latest.seq, "in_move": True, "started_wall_s": time.time()}
-                try:
-                    robot.move(motion, asynchronous=True)
-                finally:
-                    st.control_timing = {
-                        "seq": latest.seq, "in_move": False,
-                        "move_ms": (time.monotonic() - move_started) * 1000,
-                        "finished_wall_s": time.time(),
-                    }
-                st.last_control_error = None
-            except Exception as e:
-                st.last_control_error = f"{type(e).__name__}: {e}"
-                _try_recover_from_errors(st=st, context="move_joint_motion", exc=e)
-                with st.lock:
-                    st.stop_latched = True
-                    st.latest_target = None
         except Exception as e:  # Keep the loop alive; report and retry next period.
             st.last_control_error = f"{type(e).__name__}: {e}"
             LOG.exception("control loop iteration failed")
@@ -1358,12 +1411,20 @@ def stop(request: Request) -> StopOut:
         current_app_state.stop_latched = True
         current_app_state.latest_target = None
 
+    # The latch alone makes the control thread stop sending; the explicit stop
+    # motion is serialized with it and skipped (not waited on) if the robot is stuck.
     if current_app_state.robot is not None:
-        try:
-            current_app_state.robot.move(franky.JointStopMotion())
-        except Exception as e:
-            current_app_state.last_control_error = f"{type(e).__name__}: {e}"
-            _try_recover_from_errors(st=current_app_state, context="stop_endpoint", exc=e)
+        if current_app_state.robot_lock.acquire(timeout=2.0):
+            try:
+                current_app_state.robot.move(franky.JointStopMotion())
+                current_app_state.last_sent = None
+            except Exception as e:
+                current_app_state.last_control_error = f"{type(e).__name__}: {e}"
+                _try_recover_from_errors(st=current_app_state, context="stop_endpoint", exc=e)
+            finally:
+                current_app_state.robot_lock.release()
+        else:
+            current_app_state.last_control_error = "stop: robot lock busy for 2 s (control thread stuck?)"
 
     return StopOut(stopped=True, timestamp_s=now)
 
@@ -1419,10 +1480,21 @@ def get_joint_state(request: Request):
     st = _get_app_state(request)
     robot = _require_robot(st)
 
-    js = getattr(robot, "current_joint_state")
-    positions = _to_float_list(js.position)
-    velocities = _to_float_list(js.velocity)
-    return {"positions": positions, "velocities": velocities}
+    cache = st.joint_state_cache
+    if cache is not None and time.time() - cache[2] <= JOINT_STATE_CACHE_MAX_AGE_S:
+        positions, velocities, stamp = cache
+    else:
+        # Control thread is not refreshing (startup or stuck): read directly, but never
+        # concurrently with it and never block an HTTP worker on a wedged robot.
+        if not st.robot_lock.acquire(timeout=ROBOT_LOCK_TIMEOUT_S):
+            raise HTTPException(status_code=503, detail="robot busy: joint state unavailable (control thread stuck?)")
+        try:
+            positions, velocities = _read_joint_state(robot)
+        finally:
+            st.robot_lock.release()
+        stamp = time.time()
+        st.joint_state_cache = (positions, velocities, stamp)
+    return {"positions": positions, "velocities": velocities, "stamp_s": stamp}
 
 
 @app.get("/urdf")
