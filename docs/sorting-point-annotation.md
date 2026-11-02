@@ -46,6 +46,25 @@ training crop by the converter; alternatively replace `--full-frame` consistentl
 with a verified `--roi X Y SIZE`. Never assume a crop fits new camera placement.
 `scripts/convert_droidplus_to_zarr.py` supports four-phase recordings (labels 0-3, `phase_layout: four_phase`).
 
+## Drawer chicken-search and letter-cube crossword recordings
+
+Both are detected from the first segment's prompt (plain phase names or the descriptive
+training renames below; `canonical_prompt` maps them back).
+
+- **Chicken search, six phases** (`pre-open`, `open-and-home`, `pre-grasp`, `grasp`,
+  `pre-place`, `place`). Phases 0,1 may repeat when the first drawer is empty (left, then
+  right). Each pre-open segment gets a `drawer_side` (left/right) from Molmo plus gripper
+  points; open-and-home copies the preceding pre-open. Chicken leg points for 2/3, blue bin
+  for 4/5.
+- **Crossword, four phases per letter.** Run with `--word MARS`; cycle *k* moves letter
+  `word[k]` into grid cell *k+1*. Segments get `letter` and `grid_cell` tags; the place
+  target is the cube after release.
+- `--skip-existing` leaves episodes that already have `steps_molmo.jsonl` untouched.
+
+Training prompts are then rewritten in atomic_policy (`real_deploy/relabel_drawer_chicken_prompts.py`,
+`real_deploy/relabel_crossword_mars_prompts.py`), e.g. `open the left drawer and home` and
+`pre-place to slot 3`. Each script keeps the originals as `*.prompt_orig`.
+
 ## Environment
 
 Use a working CUDA GPU. The workspace used to prepare this script did not have

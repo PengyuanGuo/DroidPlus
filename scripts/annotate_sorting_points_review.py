@@ -23,11 +23,11 @@ import cv2
 
 if __package__:
     from .annotate_sorting_points import read_episode, read_rgb
-    from .annotate_sorting_points_correction import prepare_correction
+    from .annotate_sorting_points_correction import prepare_correction, segment_label
     from .annotate_sorting_points_manual import save_clicked_point
 else:
     from annotate_sorting_points import read_episode, read_rgb
-    from annotate_sorting_points_correction import prepare_correction
+    from annotate_sorting_points_correction import prepare_correction, segment_label
     from annotate_sorting_points_manual import save_clicked_point
 
 LOG = logging.getLogger(__name__)
@@ -171,9 +171,18 @@ def collect_items(dataset_root: Path, include_all: bool, methods: list[str] | No
                 continue
             start, end = segment["start_frame"], segment["end_frame"]
             samples = [i for i in segment.get("sample_indices", []) if type(i) is int and start <= i < end]
+            prompt = segment_label(segment)
+            if segment.get("letter"):
+                where = "in the grid" if prompt.split()[0] in ("pre-place", "place") else "on the table"
+                prompt += f' (click the {segment["letter"]} cube {where})'
+            if not samples:  # e.g. pre-place target measured after release: open on the last frame before release
+                closed = [i for i in range(start, end) if rows[i]["action"]["positions"][7] > 0.5]
+                samples = [closed[-1] if prompt.startswith("pre-place") and closed else end - 1]
+            if segment.get("needs_review") and segment.get("point_pixel", [-1])[0] < 0:
+                prompt += "  [FAILED: no point]"
             items.append({
                 "label": str(episode.relative_to(dataset_root)), "segment": index,
-                "prompt": segment["phase_prompt"], "start": start, "end": end,
+                "prompt": prompt, "start": start, "end": end,
                 "frame": samples[0] if samples else start, "point": segment.get("point_pixel"),
                 "status": "pending", "episode": episode,
                 "images": [row["images"]["left"] for row in rows],

@@ -12,6 +12,7 @@ import cv2
 import numpy as np
 
 from scripts.annotate_sorting_points import (
+    ground_episode,
     ground_segment,
     read_episode,
     read_rgb,
@@ -124,6 +125,65 @@ class SortingPointAnnotationTests(unittest.TestCase):
         self.path.write_text("".join(json.dumps(r) + "\n" for r in rows[:-1]))
         with self.assertRaisesRegex(ValueError, "complete four-phase cycles"):
             read_episode(self.path)
+
+    def test_drawer_six_phase_targets_and_mislabelled_frame(self):
+        names = ("grasp_handle_open", "open_drawer_and_home", "pick_cube_and_lift",
+                 "carry_place_and_home", "grasp_handle_close", "close_drawer_and_home")
+        rows = [{"seq": phase, "phase_index": phase, "phase_prompt": name,
+                 "images": {"left": "left/000000000.jpg"}} for phase, name in enumerate(names)]
+        self.path.write_text("".join(json.dumps(r) + "\n" for r in rows))
+        _, segments = read_episode(self.path)
+        self.assertEqual([s["phase_index"] for s in segments], list(range(6)))
+        for index in (0, 1, 4, 5):
+            self.assertIn("black panel on the front of the white drawer", segments[index]["molmo_prompt"])
+        self.assertIn("orange cube", segments[2]["molmo_prompt"])
+        self.assertIn("in the drawer", segments[3]["molmo_prompt"])
+        # A prompt that disagrees with its phase index is a collection mis-press.
+        rows[4]["phase_prompt"] = "close_drawer_and_home"
+        self.path.write_text("".join(json.dumps(r) + "\n" for r in rows))
+        with self.assertRaisesRegex(ValueError, "Unsupported phase/prompt"):
+            read_episode(self.path)
+        rows[4]["phase_prompt"] = names[4]
+        self.path.write_text("".join(json.dumps(r) + "\n" for r in rows[:5]))
+        with self.assertRaisesRegex(ValueError, "six drawer phases"):
+            read_episode(self.path)
+
+    def test_drawer_handle_window_and_copied_phases(self):
+        names = ("grasp_handle_open", "open_drawer_and_home", "pick_cube_and_lift",
+                 "carry_place_and_home", "grasp_handle_close", "close_drawer_and_home")
+        rows = [{"seq": i, "phase_index": i // 40, "phase_prompt": names[i // 40],
+                 "images": {"left": f"left/{i % 192:09d}.jpg"}} for i in range(240)]
+        self.path.write_text("".join(json.dumps(r) + "\n" for r in rows))
+        rows, segments = read_episode(self.path)
+        args = SimpleNamespace(**{**vars(self.args), "roi": None})
+        placing = []
+
+        def point(image, prompt):  # 80x60 frames; clamp at (0.325, 0.30), closed handle at (0.40, 0.30)
+            if "placed" in prompt:  # the carried cube early on, the drawer opening once the arm has moved
+                placing.append(prompt)
+                return np.array([40, 40] if len(placing) <= 6 else [34, 16], dtype=np.float32)
+            if "cube" in prompt:
+                return np.array([40, 40], dtype=np.float32)
+            if "panel" in prompt or "clamp" in prompt or "open drawer" in prompt:
+                return np.array([26, 18], dtype=np.float32)  # the primary prompt mistakes the clamp
+            # Fallback finds the closed handle in phase 0 and the open handle after placing (phase 4).
+            return np.array([36, 24] if placing else [32, 18], dtype=np.float32)
+
+        model = Mock()
+        model._point.side_effect = point
+        results = ground_episode(model, self.episode, rows, segments, args)
+        self.assertFalse(any(r["needs_review"] for r in results))
+        np.testing.assert_allclose(results[0]["point_pixel"], [0.4, 0.3])
+        self.assertEqual(results[1]["point_pixel"], results[0]["point_pixel"])
+        np.testing.assert_allclose(results[3]["point_pixel"], [0.425, 16 / 60], rtol=1e-6)
+        self.assertGreaterEqual(results[3]["preview_frame"], max(results[3]["sample_indices"][:6]))
+        self.assertGreater(max(results[3]["sample_indices"]), results[3]["end_frame"])
+        np.testing.assert_allclose(results[4]["point_pixel"], [0.45, 0.4])
+        np.testing.assert_allclose(results[0]["clamp_point"], [0.325, 0.3])
+        for phase in (0, 4):
+            self.assertTrue(all("black handle" in s["prompt_used"] for s in results[phase]["samples"]))
+        self.assertEqual(results[5]["point_pixel"], results[4]["point_pixel"])
+        self.assertEqual(results[5]["copied_from_phase"], 4)
 
 
 if __name__ == "__main__":

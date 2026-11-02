@@ -29,6 +29,21 @@ else:
 
 LOG = logging.getLogger(__name__)
 
+TASK_KEYS = ("letter", "grid_cell", "drawer_side")
+
+
+def segment_label(segment: dict) -> str:
+    """Same top-left preview label as annotate_sorting_points.py."""
+    prompt = segment["phase_prompt"]
+    side = segment.get("drawer_side")
+    label = prompt + (f" ({side} drawer)" if side and side not in prompt.split() else "")
+    if segment.get("letter"):  # skip parts the (renamed) prompt already states, e.g. "grasp letter M", "place to slot 1"
+        if segment["letter"] not in prompt.split():
+            label += f" ({segment['letter']})" if "slot" in prompt.split() else f" {segment['letter']}"
+        if "slot" not in prompt.split():
+            label += f" -> cell {segment['grid_cell']}"
+    return label
+
 
 def prepare_correction(image: Path, expected_segment: int | None = None) -> dict:
     image = image.resolve(strict=True)
@@ -160,8 +175,10 @@ def apply_correction(
         fallback = old_segment.get("fallback_prompt", fallback)
     primary = prediction.get("primary_prompt", primary)
     fallback = prediction.get("fallback_prompt", fallback)
+    # Keep task metadata (letter/target cell, drawer side) so labels and downstream tools survive a correction.
+    kept = {k: old_segment[k] for k in TASK_KEYS if k in old_segment}
     replacement = {
-        **segment, "molmo_prompt": primary, "fallback_prompt": fallback,
+        **segment, **kept, "molmo_prompt": primary, "fallback_prompt": fallback,
         "method": method, "sample_indices": [context["frame_index"]],
         "samples": [sample], "valid_predictions": 1, "inliers": 1, "required_inliers": 1,
         "point_pixel": point_list, "needs_review": not human_verified,
@@ -197,7 +214,7 @@ def apply_correction(
     height, width = preview.shape[:2]
     pixel = (min(width - 1, round(point[0] * width)), min(height - 1, round(point[1] * height)))
     cv2.drawMarker(preview, pixel, (0, 0, 255), cv2.MARKER_CROSS, 30, 3)
-    cv2.putText(preview, segment["phase_prompt"], (12, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
+    cv2.putText(preview, segment_label(report["segments"][index]), (12, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
     ok, encoded = cv2.imencode(".jpg", preview)
     if not ok:
         raise RuntimeError("Could not encode corrected preview")

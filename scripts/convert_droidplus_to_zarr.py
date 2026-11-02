@@ -20,12 +20,20 @@ TEXT_LEN = 128
 PHASE_LAYOUTS = {
     "two_phase": {"grasp": 0, "place": 1},
     "four_phase": {"pre-grasp": 0, "grasp": 1, "pre-place": 2, "place": 3},
+    "drawer_six_phase": {"grasp_handle_open": 0, "open_drawer_and_home": 1, "pick_cube_and_lift": 2,
+                         "carry_place_and_home": 3, "grasp_handle_close": 4, "close_drawer_and_home": 5},
 }
 
 
 def phase_layout(path: Path, segments: list[dict]) -> str:
-    """Two-phase: 0,1 x3 segments. Four-phase: complete 0,1,2,3 cycles (one per object)."""
+    """Two-phase: 0,1 x3 segments. Four-phase: complete 0,1,2,3 cycles (one per object).
+    Drawer six-phase: one 0..5 sequence (open drawer, put cube in, close drawer)."""
     labels = [s["phase_index"] for s in segments]
+    if segments and segments[0]["phase_prompt"] == "grasp_handle_open":
+        expected = PHASE_LAYOUTS["drawer_six_phase"]
+        if [(s["phase_prompt"], s["phase_index"]) for s in segments] != list(expected.items()):
+            raise ValueError(f"{path}: expected the six drawer phases 0..5 in order: {list(expected)}")
+        return "drawer_six_phase"
     if segments and segments[0]["phase_prompt"].startswith("pre-grasp "):
         if not labels or len(labels) % 4 or labels != [0, 1, 2, 3] * (len(labels) // 4):
             raise ValueError(f"{path}: expected complete four-phase cycles 0,1,2,3")
@@ -131,7 +139,7 @@ def load_episode(path: Path, output_roi=None, wrist_roi=None, task_prompt=None, 
             values[7] = 1.0 - values[7]  # Native DROID 0=open -> training 1=open.
             target.append(values.astype(np.float32))
         phase, prompt = row.get("phase_index"), row.get("phase_prompt")
-        if type(phase) is not int or phase not in (0, 1, 2, 3) or not isinstance(prompt, str) or not prompt.strip():
+        if type(phase) is not int or phase not in range(6) or not isinstance(prompt, str) or not prompt.strip():
             raise ValueError(f"{path}: frame {frame}: invalid phase index/prompt")
         if not segments or segments[-1]["phase_index"] != phase:
             segments.append({"phase_index": phase, "phase_prompt": prompt, "start_frame": frame, "end_frame": frame})
@@ -219,7 +227,7 @@ def load_episode(path: Path, output_roi=None, wrist_roi=None, task_prompt=None, 
 
 
 def preflight(root: Path, *, roi=None, wrist_roi=None, max_episodes=0, task_prompt=None, require_reviewed=False) -> list[dict]:
-    paths = [root / "steps_molmo.jsonl"] if (root / "steps_molmo.jsonl").is_file() else sorted(root.glob("teleop_*/episode_*/steps_molmo.jsonl"))
+    paths = [root / "steps_molmo.jsonl"] if (root / "steps_molmo.jsonl").is_file() else sorted(root.glob("*/episode_*/steps_molmo.jsonl"))
     if not paths:
         paths = sorted(root.glob("episode_*/steps_molmo.jsonl"))
     if max_episodes:
