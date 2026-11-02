@@ -133,7 +133,8 @@ def main() -> None:
         policy_name=f"teleop_{args.controller}",
         controller_info={key: getattr(args, key) for key in (
             "controller", "spacemouse_device", "linear_speed", "angular_speed",
-            "joint_speed", "deadzone", "input_timeout", "enable_button", "gripper_button", "axis_map", "button_mode",
+            "joint_speed", "deadzone", "rotation_deadzone", "rotation", "input_timeout", "enable_button",
+            "gripper_button", "axis_map", "button_mode",
         )},
         record=bool(record),
     )

@@ -1,0 +1,15 @@
+cd /home/atomic/Project/DroidPlus
+export FRANKA_URDF_PATH="$PWD/models/franka_panda/panda.urdf"
+
+.venv/bin/python scripts/run_spacemouse_crossword_4phase_ui.py \
+  --franky-service-url http://192.168.9.167:54321 \
+  --web-port 54325 \
+  --record-rate-hz 15
+
+# Open http://localhost:54325; click Start Episode.
+# Center the SpaceMouse and release both buttons to arm.
+# Hold button 0 to move; while holding it, tap button 1 to toggle the gripper.
+# Phases: 0=pre-grasp, 1=grasp, 2=pre-place, 3=place.
+# Repeat 0,1,2,3 for M, A, R, S in one episode, then Stop Episode and save labels.
+# For one letter per episode, append --episode-mode letter and enter the letter
+# in the UI instruction, e.g. "Place the M tile in the crossword word MARS."

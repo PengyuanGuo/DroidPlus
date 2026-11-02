@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""SO-101 drawer/cube collection: six named phases, mandatory left/wrist images.
+"""SO-101 or SpaceMouse drawer/cube collection with six named phases and two cameras.
 
 Uses DroidPlus's existing teleoperation UI, robot clients, and recording loop.
 Phase names are written to every step during collection, not added afterward.

@@ -3,10 +3,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # sorting--
 """
-Web UI teleop runner — browser interface for SO-101 teleop episodes.
+Web UI teleop runner — browser interface for SO-101 or SpaceMouse episodes.
 
 Parallels ``scripts/run_experiment_ui.py`` but for data-generation. The
-SO-101 leader arm is connected at launch; each episode is started/stopped
+The selected controller is connected at launch; each episode is started/stopped
 from the browser (Enter / Esc, or the terminal's ESC key).
 
 Usage:
@@ -62,17 +62,42 @@ DEFAULT_PORT = 54325
 PHASE_NAMES = ("pre-grasp", "grasp", "pre-place", "place")
 SAVE_PHASE_PROMPTS = False
 REQUIRED_CAMERAS: tuple[str, ...] = ()
+PHASE_REPETITIONS = 1
+PHASE_TRANSITIONS: dict[int, tuple[int, ...]] | None = None  # branching tasks: allowed next phases
+FINAL_PHASES: tuple[int, ...] | None = None
+PHASE_FLOW_GUIDANCE = ""
 
 
 def configure_phase_profile(names: tuple[str, ...], *, save_prompts: bool = False,
-                            required_cameras: tuple[str, ...] = ()) -> None:
-    """Configure a task-specific launcher without duplicating the web/robot loop."""
+                            required_cameras: tuple[str, ...] = (), phase_repetitions: int = 1,
+                            phase_transitions: dict[int, tuple[int, ...]] | None = None,
+                            final_phases: tuple[int, ...] | None = None, flow_guidance: str = "") -> None:
+    """Configure a task-specific launcher without duplicating the web/robot loop.
+
+    ``phase_transitions``/``final_phases`` describe tasks whose phase order branches;
+    episodes are then reviewed against them instead of a fixed 0..N-1 order.
+    """
     if not 1 <= len(names) <= 10 or any(not isinstance(name, str) or not name.strip() for name in names):
         raise ValueError("Configure 1..10 nonempty phase names for digit-key selection")
     if any(role not in ("left", "wrist", "right") for role in required_cameras):
         raise ValueError("Unknown required camera role")
-    global PHASE_NAMES, SAVE_PHASE_PROMPTS, REQUIRED_CAMERAS
+    if type(phase_repetitions) is not int or phase_repetitions < 1:
+        raise ValueError("phase_repetitions must be a positive integer")
+    if (phase_transitions is None) != (final_phases is None):
+        raise ValueError("phase_transitions and final_phases must be given together")
+    if phase_transitions is not None:
+        indices = set(range(len(names)))
+        used = set(phase_transitions) | {p for nxt in phase_transitions.values() for p in nxt} | set(final_phases)
+        if not used <= indices or not final_phases or phase_repetitions != 1:
+            raise ValueError("phase_transitions/final_phases must use configured phase indices, without repetitions")
+    global PHASE_NAMES, SAVE_PHASE_PROMPTS, REQUIRED_CAMERAS, PHASE_REPETITIONS
+    global PHASE_TRANSITIONS, FINAL_PHASES, PHASE_FLOW_GUIDANCE
     PHASE_NAMES, SAVE_PHASE_PROMPTS, REQUIRED_CAMERAS = tuple(names), save_prompts, tuple(required_cameras)
+    PHASE_REPETITIONS = phase_repetitions
+    PHASE_TRANSITIONS = ({k: tuple(v) for k, v in phase_transitions.items()}
+                         if phase_transitions is not None else None)
+    FINAL_PHASES = tuple(final_phases) if final_phases is not None else None
+    PHASE_FLOW_GUIDANCE = flow_guidance
 
 
 def verify_required_cameras(droid: DroidPlus) -> None:
@@ -110,6 +135,8 @@ class AppState:
     session: TeleopSessionConfig
     so101_port: str
     base_run_dir: str | None
+    default_instruction: str = ""
+    default_task: str = ""
     # Episode control
     episode_idx: int = 0
     episode_thread: threading.Thread | None = None
@@ -143,6 +170,9 @@ def _run_episode_thread(state: AppState) -> None:
                 jpeg_quality=state.session.record_jpeg_quality,
                 cameras=record_cameras or ["left", "wrist"],
                 phase_prompts=dict(enumerate(PHASE_NAMES)) if SAVE_PHASE_PROMPTS else None,
+                phase_repetitions=PHASE_REPETITIONS,
+                phase_transitions=PHASE_TRANSITIONS,
+                final_phases=FINAL_PHASES,
             )
 
         episode_runner = (run_spacemouse_episode if state.session.policy_name == "teleop_spacemouse"
@@ -194,7 +224,10 @@ def _run_episode_thread(state: AppState) -> None:
             state.episode_idx += 1
 
     except Exception as e:
-        print(f"Episode thread error: {e}")
+        print(f"Episode thread error: {e}", flush=True)
+        # Include chained worker/HTTP errors instead of hiding the root cause.
+        import traceback
+        traceback.print_exc()
     finally:
         with state.lock:
             state.status = "idle"
@@ -387,7 +420,7 @@ LANDING_PAGE_HTML = """<!doctype html>
     const pendingLabels = {};
 
     // ── Restore persisted fields ──
-    const LS_KEY = "teleop_service_state_v1";
+    const LS_KEY = __STORAGE_KEY_JSON__;
     function loadPersisted() {
       try {
         const raw = localStorage.getItem(LS_KEY);
@@ -422,6 +455,8 @@ LANDING_PAGE_HTML = """<!doctype html>
         rateHzEl.textContent = d.rate_hz;
         recordRateHzEl.textContent = d.record_rate_hz;
         recordStatusEl.textContent = d.record ? `to ${d.base_run_dir}` : "disabled";
+        if (!instructionEl.value.trim()) instructionEl.value = d.default_instruction || "";
+        if (!taskEl.value.trim()) taskEl.value = d.default_task || "";
         if (minZEl.value === "") minZEl.value = d.min_z;
       } catch(e) { console.error("Failed to load config", e); }
     }
@@ -726,11 +761,23 @@ _state: AppState | None = None
 @app.get("/", response_class=HTMLResponse)
 def root():
     last = len(PHASE_NAMES) - 1
+    if PHASE_FLOW_GUIDANCE:
+        sequence_guidance = PHASE_FLOW_GUIDANCE.rstrip() + " "
+    elif PHASE_REPETITIONS > 1:
+        sequence_guidance = (f"Repeat phases 0–{last} in order {PHASE_REPETITIONS} times per episode; "
+                             "select 0 for the next letter. ")
+    else:
+        sequence_guidance = "Follow the phases in order once per episode. "
     guidance = (f"Each episode starts at phase 0. Pause at boundaries, select the phase, then continue. "
                 f"Use buttons or number keys 0–{last} outside text fields. "
-                + ("Follow the phases in order once per episode. Each row saves phase_index and its phase_prompt."
+                + (sequence_guidance + "Each row saves phase_index and its phase_prompt."
                    if SAVE_PHASE_PROMPTS else "Select 0 again for the next item. Phase prompts are annotated after collection."))
-    return HTMLResponse(content=LANDING_PAGE_HTML.replace("__PHASE_NAMES_JSON__", json.dumps(PHASE_NAMES)).replace("__PHASE_GUIDANCE__", guidance))
+    storage_key = "teleop_service_state_v1"
+    if _state is not None and _state.default_task:
+        storage_key += ":" + _state.default_task
+    return HTMLResponse(content=LANDING_PAGE_HTML.replace("__PHASE_NAMES_JSON__", json.dumps(PHASE_NAMES))
+                        .replace("__PHASE_GUIDANCE__", guidance)
+                        .replace("__STORAGE_KEY_JSON__", json.dumps(storage_key)))
 
 
 @app.get("/config")
@@ -747,6 +794,8 @@ def get_config():
         "so101_port": s.so101_port,
         "gripper_initialized": s.gripper_initialized,
         "base_run_dir": s.base_run_dir,
+        "default_instruction": s.default_instruction,
+        "default_task": s.default_task,
     }
 
 
@@ -802,9 +851,9 @@ def episode_start(body: dict):
     if s is None:
         raise HTTPException(500, "not initialized")
 
-    instruction = (body.get("instruction") or "").strip()
+    instruction = (body.get("instruction") or s.default_instruction).strip()
     experiment = (body.get("experiment") or "").strip() or None
-    task = (body.get("task") or "").strip()
+    task = (body.get("task") or s.default_task).strip()
     try:
         action_step_limit = int(body.get("action_step_limit", -1))
     except (TypeError, ValueError):
@@ -960,6 +1009,7 @@ def main() -> None:
     p.add_argument("--jpeg-quality", type=int, default=90, help="JPEG quality for camera snapshots")
     p.add_argument("--output-dir", default="output", help="Base output directory for recordings")
     p.add_argument("--task", default="", help="Task name (used for the run directory)")
+    p.add_argument("--instruction", default="", help="Default episode instruction shown in the UI")
     p.add_argument("--dry-run", action="store_true",
         help="Read controller but do not command the robot or gripper")
     add_controller_arguments(p)
@@ -984,7 +1034,8 @@ def main() -> None:
         policy_name=f"teleop_{args.controller}",
         controller_info={key: getattr(args, key) for key in (
             "controller", "spacemouse_device", "linear_speed", "angular_speed",
-            "joint_speed", "deadzone", "input_timeout", "enable_button", "gripper_button", "axis_map", "button_mode",
+            "joint_speed", "deadzone", "rotation_deadzone", "rotation", "input_timeout", "enable_button",
+            "gripper_button", "axis_map", "button_mode",
         )},
         record=bool(args.record),
     )
@@ -1042,6 +1093,8 @@ def main() -> None:
         session=session,
         so101_port=args.port if args.controller == "so101" else (args.spacemouse_device or "SpaceMouse (auto)"),
         base_run_dir=base_run_dir,
+        default_instruction=args.instruction,
+        default_task=args.task,
     )
 
     print("\n  teleop_service")

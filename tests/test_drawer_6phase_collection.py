@@ -94,6 +94,54 @@ class DrawerSixPhaseTests(unittest.TestCase):
             self.assertTrue(metadata["phase_annotation"]["needs_review"])
             self.assertTrue(any("Expected phases" in issue for issue in metadata["phase_annotation"]["issues"]))
 
+    def test_spacemouse_ui_records_all_six_phase_prompts(self):
+        rgb = np.zeros((8, 8, 3), dtype=np.uint8)
+        droid = SimpleNamespace(left_camera_id='31262010', wrist_camera_id='14633207',
+                                right_camera_id='', get_left_image=lambda: rgb,
+                                get_wrist_image=lambda: rgb)
+
+        def record_episode(**kwargs):
+            recorder = kwargs['recorder']
+            for phase in range(6):
+                for frame in range(8):
+                    recorder.record_step(
+                        seq=phase * 8 + frame, left_rgb=rgb, wrist_rgb=rgb,
+                        state_positions=np.zeros(8), state_velocities=np.zeros(8),
+                        action_positions=np.zeros(8), action_velocities=np.zeros(8), phase_index=phase,
+                    )
+            result = EpisodeResult(0, 48, 1, 6, [], recorder, False, True)
+            result.actual_record_rate_hz = 10.0
+            return result
+
+        with tempfile.TemporaryDirectory() as directory:
+            state = ui.AppState(
+                droid=droid, teleop=object(), gripper_initialized=False,
+                pin_model=None, pin_data=None, ee_frame='tool',
+                session=TeleopSessionConfig(policy_name='teleop_spacemouse',
+                    controller_info={'controller': 'spacemouse', 'rotation': 'full'}),
+                so101_port='SpaceMouse (auto)', base_run_dir=directory,
+                current_config=EpisodeConfig(task='drawer', instruction='put the cube into the drawer'),
+                status='running',
+            )
+            with patch.object(ui, 'run_spacemouse_episode', side_effect=record_episode) as mouse_runner, \
+                 patch.object(ui, 'run_teleop_episode') as arm_runner, \
+                 patch.object(ui, 'compute_and_save_ee_trajectory_single'):
+                ui._run_episode_thread(state)
+            mouse_runner.assert_called_once()
+            arm_runner.assert_not_called()
+            self.assertEqual(state.status, 'idle')
+            self.assertEqual(len(state.history), 1)
+            episode = Path(directory) / 'episode_000'
+            meta = json.loads((episode / 'meta.json').read_text())
+            self.assertEqual(meta['policy']['name'], 'teleop_spacemouse')
+            self.assertEqual(meta['control']['motion_mode'], 'xyz_rpy')
+            self.assertEqual(meta['recording_status'], 'complete')
+            self.assertFalse(meta['phase_annotation']['needs_review'])
+            rows = [json.loads(line) for line in (episode / 'steps.jsonl').read_text().splitlines()]
+            self.assertEqual(len(rows), 48)
+            for row in rows:
+                self.assertEqual(row['phase_prompt'], PHASE_NAMES[row['phase_index']])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -5,6 +5,7 @@ select this runner explicitly; the robot-facing API and dataset schema are share
 """
 from __future__ import annotations
 
+import sys
 import time
 from typing import TYPE_CHECKING, Any, Callable
 
@@ -13,7 +14,7 @@ import numpy as np
 from droid_plus.datagen.async_recording import AsyncTeleopRecorder
 from droid_plus.datagen.async_target import AsyncTargetSender
 from droid_plus.datagen.spacemouse import CartesianController
-from droid_plus.datagen.teleop_runner import TeleopSessionConfig
+from droid_plus.datagen.teleop_runner import TeleopSessionConfig, finalize_teleop_episode_recording
 from droid_plus.eval.episode_runner import EpisodeConfig, EpisodeResult
 from droid_plus.logging import EpisodeRecorder
 
@@ -87,6 +88,27 @@ def run_spacemouse_episode(
     sender = None
     timings = {}
     previous_timings = {}
+
+    def save_metadata(status: str, error: BaseException | None = None) -> None:
+        if recorder is None or not session.record:
+            return
+        partial = EpisodeResult(
+            episode_idx=recorder.episode_idx, seq=rec_seq,
+            t_start=t_episode_start, t_end=time.time(), inference_times=[],
+            recorder=recorder, stopped_by_limit=_stopped_by_limit,
+            stopped_by_caller=_stopped_by_caller,
+        )
+        if async_recorder is not None:
+            partial.actual_record_rate_hz = async_recorder.actual_rate
+        finalize_teleop_episode_recording(
+            result=partial, config=config, session=session,
+            close_writers=error is not None, recording_status=status,
+            recording_error=f"{type(error).__name__}: {error}" if error is not None else None,
+            episode_valid=False if error is not None else None,
+        )
+
+    # Persist session context before hardware IO, and refresh it after workers drain.
+    save_metadata("recording")
     try:
         if not session.dry_run:
             _require_robot_control(droid)
@@ -94,7 +116,8 @@ def run_spacemouse_episode(
             pin_model, pin_data, ee_frame,
             droid.get_current_joint_state()["positions"], teleop.config, session.min_z,
         )
-        print(f"SpaceMouse XYZ+yaw ({teleop.config.button_mode}): center cap and release buttons to arm.")
+        motion = "XYZ+roll/pitch/yaw" if teleop.config.rotation == "full" else "XYZ+yaw"
+        print(f"SpaceMouse {motion} ({teleop.config.button_mode}): center cap and release buttons to arm.")
         if visualizer is not None:
             visualizer.reset()
         if not session.dry_run:
@@ -178,7 +201,7 @@ def run_spacemouse_episode(
                 record_hz = async_recorder.actual_rate if async_recorder is not None else 0.0
                 posts, slowest_post_ms = sender.take_stats() if sender is not None else (0, 0.0)
                 print(f"[spacemouse] {cartesian.status}; enable={enabled} "
-                      f"xyz={np.round(twist[:3], 3)} yaw={twist[5]:.3f}; "
+                      f"xyz={np.round(twist[:3], 3)} rpy={np.round(twist[3:], 3)}; "
                       f"control={actual_hz:.1f}Hz record={record_hz:.1f}Hz "
                       f"posts={posts - status_posts}/s slowest_post_ms={slowest_post_ms:.1f}; "
                       + " ".join(f"{key}={value:.1f}" for key, value in timings.items()), flush=True)
@@ -196,16 +219,21 @@ def run_spacemouse_episode(
               flush=True)
         raise
     finally:
-        if not session.dry_run:
-            _stop_robot(droid)
-            if sender is not None:
-                # A post finishing after the first stop would unlatch it; stop again once drained.
-                sender.close()
+        try:
+            if not session.dry_run:
                 _stop_robot(droid)
-
-        if async_recorder is not None:
-            async_recorder.close()
-            rec_seq = async_recorder.count
+                if sender is not None:
+                    # A post finishing after the first stop would unlatch it; stop again once drained.
+                    sender.close()
+                    _stop_robot(droid)
+        finally:
+            try:
+                if async_recorder is not None:
+                    async_recorder.close()
+                    rec_seq = async_recorder.count
+            finally:
+                error = sys.exc_info()[1]
+                save_metadata("interrupted" if error is not None else "pending_labels", error)
 
     result = EpisodeResult(
         episode_idx=recorder.episode_idx if recorder is not None else 0,

@@ -19,7 +19,8 @@ def test_axis_mapping_deadzone_and_vector_speed():
         axis_twist([np.nan] * 6, cfg)
 
 
-@pytest.mark.parametrize('kwargs', [dict(deadzone=1), dict(linear_speed=-1), dict(timeout=float('nan')),
+@pytest.mark.parametrize('kwargs', [dict(deadzone=1), dict(rotation_deadzone=1), dict(rotation='rpy'),
+                                    dict(linear_speed=-1), dict(timeout=float('nan')),
                                     dict(axis_map=(1, 1, 2, 3, 4, 5)), dict(enable_button=1)])
 def test_invalid_config(kwargs):
     with pytest.raises(ValueError):
@@ -135,7 +136,7 @@ def test_live_runner_records_joint_targets_and_phase(controller, monkeypatch):
     droid = Mock(left_camera_id='', wrist_camera_id='', right_camera_id='')
     droid.get_current_joint_state.side_effect = lambda: {'positions': controller.q.copy()}
     droid.get_gripper_obs_value.return_value = 0.0
-    recorder = Mock(episode_idx=0)
+    recorder = Mock(episode_idx=0, phase_labels=[], phase_prompts={}, phase_repetitions=1)
     monkeypatch.setattr(runner, 'CartesianController', lambda *args: controller)
     start = controller.q.copy()
     result = runner.run_spacemouse_episode(
@@ -157,14 +158,47 @@ def test_live_runner_records_joint_targets_and_phase(controller, monkeypatch):
     assert recorded['action_positions'][7] == 1.0
 
 
-def test_roll_pitch_input_ignored(controller):
-    cfg = SpaceMouseConfig()
+def test_yaw_mode_ignores_roll_pitch(controller):
+    cfg = SpaceMouseConfig(rotation='yaw')
     np.testing.assert_array_equal(axis_twist([0, 0, 0, 1, -1, 0], cfg), np.zeros(6))
     c = controller
+    c.config = cfg
     c.step(np.zeros(6), False, False, c.q, .01)
     before = c.q.copy()
     c.step(np.array([0, 0, 0, .2, -.2, 0]), True, False, c.q, .01)
     np.testing.assert_array_equal(c.q, before)
+
+
+def test_rotation_deadzone_suppresses_push_tilt():
+    cfg = SpaceMouseConfig()
+    # A forward push measured on the rig: x=0.8 with pitch 0.3 cross-talk.
+    twist = axis_twist([.8, 0, 0, 0, .3, 0], cfg)
+    assert twist[0] > 0 and not np.any(twist[3:])
+    twist = axis_twist([0, 0, 0, 1, -1, 0], cfg)
+    assert twist[3] > 0 and twist[4] < 0
+    assert np.linalg.norm(twist[3:]) == pytest.approx(cfg.angular_speed)
+
+
+def test_panda_roll_pitch_rotate_about_base_axes_and_hold_position():
+    from pathlib import Path
+
+    import pinocchio as pin
+
+    from droid_plus.analysis.end_effector_pose import build_model_from_urdf
+    from droid_plus.services.franky_client import HOME_POSITION
+    source = Path(__file__).resolve().parents[1] / 'models/franka_panda/panda.urdf'
+    m, d, f = build_model_from_urdf(source.read_text())
+    c = CartesianController(m, d, f, HOME_POSITION, SpaceMouseConfig(), .12)
+    c.safe(c.q)
+    start_pos, initial = d.oMf[c.frame].translation.copy(), c.orientation.copy()
+    c.step(np.zeros(6), False, False, c.q, .01)
+    omega = np.array([.1, -.1, 0.])
+    for _ in range(100):  # 1 s
+        c.step(np.r_[0, 0, 0, omega], True, False, c.q, .01)
+    c.safe(c.q)
+    expected = pin.exp3(omega) @ initial
+    assert np.linalg.norm(pin.log3(expected @ d.oMf[c.frame].rotation.T)) < 1e-3
+    assert np.linalg.norm(d.oMf[c.frame].translation - start_pos) < 1e-3
 
 
 def test_panda_yaw_holds_tilt_and_timing_is_rate_independent():
@@ -178,7 +212,7 @@ def test_panda_yaw_holds_tilt_and_timing_is_rate_independent():
     results = []
     for dt in (.01, .02):
         m, d, f = build_model_from_urdf(source.read_text())
-        c = CartesianController(m, d, f, HOME_POSITION, SpaceMouseConfig(), .23)
+        c = CartesianController(m, d, f, HOME_POSITION, SpaceMouseConfig(rotation='yaw'), .23)
         initial = c.orientation.copy()
         c.step(np.zeros(6), False, False, c.q, dt)
         for _ in range(round(1 / dt)):
@@ -234,7 +268,7 @@ def test_slow_camera_does_not_block_control_and_stop_precedes_join(controller, m
     droid.get_left_image.side_effect = camera
     droid.set_target_joint_state.side_effect = command
     droid.stop.side_effect = robot_stopped.set
-    recorder = Mock(episode_idx=0)
+    recorder = Mock(episode_idx=0, phase_labels=[], phase_prompts={}, phase_repetitions=1)
     recorder.record_step.side_effect = lambda **kw: writes.append(kw)
     mouse = mouse_sample()
     mouse.read = Mock(return_value=(np.zeros(6), False, False))

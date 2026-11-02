@@ -19,6 +19,7 @@ class AsyncTeleopRecorder:
         self.latest = None
         self.stopping = False
         self.error = None
+        self.error_context = 'waiting for a control snapshot'
         self.count = 0
         self.timestamps = []
         self.thread = threading.Thread(target=self._run, name='teleop-recording', daemon=True)
@@ -33,7 +34,7 @@ class AsyncTeleopRecorder:
         )
         with self.condition:
             if self.error is not None:
-                raise RuntimeError('Recording worker failed') from self.error
+                raise self._failure() from self.error
             self.latest = snapshot  # Replace; never accumulate a stale frame queue.
             self.condition.notify()
 
@@ -56,15 +57,19 @@ class AsyncTeleopRecorder:
                 started = time.monotonic()
                 images = {}
                 for role in ('left', 'wrist', 'right'):
+                    self.error_context = f'{role} camera {getattr(self.droid, f"{role}_camera_id")}'
                     images[role + '_rgb'] = (
                         getattr(self.droid, f'get_{role}_image')(jpeg_quality=self.jpeg_quality)
                         if getattr(self.droid, f'{role}_camera_id') else None
                     )
+                self.error_context = 'gripper observation'
                 gripper_obs = float(self.droid.get_gripper_obs_value()) if self.gripper_initialized else 0.0
+                self.error_context = 'packing state/action'
                 if dq.shape != (7,):
                     dq = np.zeros(7)
                 state_pos, state_vel = pack_state_action(q, dq, gripper_obs)
                 action_pos, action_vel = pack_state_action(target, np.zeros(7), grip)
+                self.error_context = 'recording step data and images'
                 self.recorder.record_step(
                     seq=self.count, **images, state_positions=state_pos, state_velocities=state_vel,
                     action_positions=action_pos, action_velocities=action_vel,
@@ -84,7 +89,13 @@ class AsyncTeleopRecorder:
         # Join before callers finalize/close the recorder. HTTP clients have timeouts.
         self.thread.join()
         if self.error is not None:
-            raise RuntimeError('Recording worker failed') from self.error
+            raise self._failure() from self.error
+
+    def _failure(self):
+        return RuntimeError(
+            f'Recording worker failed during {self.error_context}: '
+            f'{type(self.error).__name__}: {self.error}'
+        )
 
     @property
     def actual_rate(self):

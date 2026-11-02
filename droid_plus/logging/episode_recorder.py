@@ -63,6 +63,9 @@ class EpisodeRecorder:
         max_image_queue: int = 8192,
         cameras: list[str] | None = None,
         phase_prompts: dict[int, str] | None = None,
+        phase_repetitions: int = 1,
+        phase_transitions: dict[int, tuple[int, ...]] | None = None,
+        final_phases: tuple[int, ...] | None = None,
     ) -> None:
         """
         Initialize episode recorder.
@@ -74,12 +77,22 @@ class EpisodeRecorder:
             max_image_queue: Max queue size for async image writer
             cameras: List of camera names to record (default: ["left", "wrist"])
             phase_prompts: Optional phase ID-to-name mapping saved with every labelled row.
+            phase_repetitions: Expected number of complete phase cycles per episode.
+            phase_transitions: Allowed next phases per phase, for branching tasks
+                (replaces the in-order check when reviewing labels).
+            final_phases: Allowed last phases when ``phase_transitions`` is set.
         """
         self.base_run_dir = base_run_dir
         self.episode_idx = episode_idx
         self.jpeg_quality = jpeg_quality
         self.cameras = cameras or ["left", "wrist"]
         self.phase_prompts = dict(phase_prompts or {})
+        if type(phase_repetitions) is not int or phase_repetitions < 1:
+            raise ValueError("phase_repetitions must be a positive integer")
+        self.phase_repetitions = phase_repetitions
+        self.phase_transitions = ({int(k): tuple(v) for k, v in phase_transitions.items()}
+                                  if phase_transitions is not None else None)
+        self.final_phases = tuple(final_phases) if final_phases is not None else None
         if any(type(k) is not int or not 0 <= k <= 127 or not isinstance(v, str) or not v.strip()
                for k, v in self.phase_prompts.items()):
             raise ValueError("phase_prompts must map integer phases 0..127 to nonempty strings")
@@ -199,6 +212,7 @@ class EpisodeRecorder:
         control_info: dict[str, Any] | None = None,
         inference_times: list[float] | None = None,
         extra_meta: dict[str, Any] | None = None,
+        close_writers: bool = True,
     ) -> str:
         """
         Finalize the episode recording: close writers and write meta.json.
@@ -212,6 +226,8 @@ class EpisodeRecorder:
             control_info: Control configuration dict
             inference_times: List of inference times for stats
             extra_meta: Additional fields to include in meta.json
+            close_writers: False saves an atomic metadata checkpoint while keeping
+                recording open. Call finalize again with True when finished.
 
         Returns:
             Path to meta.json
@@ -219,18 +235,20 @@ class EpisodeRecorder:
         if self._closed:
             raise RuntimeError("EpisodeRecorder is already closed")
 
-        self._closed = True
+        if close_writers:
+            self._closed = True
         t_end = time.time()
 
         # Close writers
-        try:
-            self._data_writer.close()
-        except Exception:
-            pass
-        try:
-            self._image_writer.close()
-        except Exception:
-            pass
+        if close_writers:
+            try:
+                self._data_writer.close()
+            except Exception:
+                pass
+            try:
+                self._image_writer.close()
+            except Exception:
+                pass
 
         # Compute inference time stats
         inference_stats = compute_timing_stats(inference_times or [])
@@ -279,13 +297,18 @@ class EpisodeRecorder:
                 else "str (empty until annotated after collection)")
         if self.phase_prompts:
             meta["phase_prompt_mapping"] = self.phase_prompts
+        if self.phase_transitions is not None:
+            meta["phase_transitions"] = {str(k): list(v) for k, v in self.phase_transitions.items()}
+            meta["final_phases"] = list(self.final_phases or ())
         if extra_meta:
             meta.update(extra_meta)
 
         # Write meta.json
         meta_path = os.path.join(self.episode_dir, "meta.json")
-        with open(meta_path, "w", encoding="utf-8") as f:
+        temp_path = meta_path + ".tmp"
+        with open(temp_path, "w", encoding="utf-8") as f:
             json.dump(meta, f, indent=2)
+        os.replace(temp_path, meta_path)
 
         return meta_path
 

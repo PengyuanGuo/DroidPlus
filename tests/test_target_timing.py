@@ -48,3 +48,20 @@ def test_target_middleware_reports_request_duration():
         assert 'target_request;dur=' in result.headers['Server-Timing']
         assert state.target_timing['request_ms'] >= 2
         assert state.target_timing['status'] == 422
+
+
+def test_thread_diagnostics_do_not_need_robot_or_change_service_timeouts():
+    path = Path(__file__).resolve().parents[1] / 'droid_plus/services/franky_service.py'
+    spec = importlib.util.spec_from_file_location('_test_franky_diagnostics', path)
+    module = importlib.util.module_from_spec(spec)
+    with patch.dict(sys.modules, {'franky': SimpleNamespace(), spec.name: module}):
+        spec.loader.exec_module(module)
+        with patch.object(module, 'faulthandler') as handler:
+            info = module._configure_thread_diagnostics(15.)
+            handler.enable.assert_called_once_with(all_threads=True)
+            handler.dump_traceback_later.assert_called_once_with(15., repeat=True)
+            assert info['pid'] > 0 and len(info['source_sha256']) == 64
+            assert info['traceback_interval_s'] == 15.
+        with patch.object(module, 'faulthandler') as handler:
+            module._configure_thread_diagnostics()
+            handler.dump_traceback_later.assert_not_called()

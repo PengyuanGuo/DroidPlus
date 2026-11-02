@@ -216,6 +216,13 @@ def run_teleop_episode(
 
 # ── Recording finalization ───────────────────────────────────────────────────
 
+def _motion_mode(session: TeleopSessionConfig) -> str:
+    if session.policy_name != "teleop_spacemouse":
+        return "joint"
+    rotation = (session.controller_info or {}).get("rotation", "yaw")
+    return "xyz_rpy" if rotation == "full" else "xyz_yaw"
+
+
 def finalize_teleop_episode_recording(
     *,
     result: EpisodeResult,
@@ -225,21 +232,29 @@ def finalize_teleop_episode_recording(
     episode_success: bool | None = None,
     episode_score: float | None = None,
     episode_notes: str | None = None,
+    close_writers: bool = True,
+    recording_status: str = "complete",
+    recording_error: str | None = None,
 ) -> None:
     """Finalize a teleop episode recording: close writers, write meta.json.
 
     Mirrors ``eval.episode_runner.finalize_episode_recording`` but emits
-    teleop-shaped ``policy`` and ``control`` meta blocks.
+    teleop-shaped ``policy`` and ``control`` meta blocks. With close_writers=False,
+    save a checkpoint so session metadata survives interruptions and label prompts.
     """
     if result.recorder is None:
         return
     effective_rate = session.rate_hz / max(1, round(session.rate_hz / session.record_rate_hz))
     effective_rate = getattr(result, "actual_record_rate_hz", effective_rate)
+    repetitions = result.recorder.phase_repetitions
     phase_review = review_phase_labels(
         result.recorder.phase_labels, min_frames=max(1, int(np.ceil(0.5 * effective_rate))),
+        cycle_length=len(result.recorder.phase_prompts) if repetitions > 1 else None,
+        transitions=result.recorder.phase_transitions, final_phases=result.recorder.final_phases,
     )
-    if result.recorder.phase_prompts:
-        expected = sorted(result.recorder.phase_prompts)
+    # Branching tasks are checked by their transitions above, not a fixed sequence.
+    if result.recorder.phase_prompts and result.recorder.phase_transitions is None:
+        expected = sorted(result.recorder.phase_prompts) * repetitions
         phase_review["expected_phase_sequence"] = expected
         observed = [segment["phase_index"] for segment in phase_review["segments"]]
         if observed != expected:
@@ -256,7 +271,7 @@ def finalize_teleop_episode_recording(
             policy_info={"name": session.policy_name},
             control_info={
                 "controller": session.controller_info or {"type": "so101"},
-                "motion_mode": "xyz_yaw" if session.policy_name == "teleop_spacemouse" else "joint",
+                "motion_mode": _motion_mode(session),
                 "rate_hz": session.rate_hz,
                 "record_rate_hz": effective_rate,
                 "requested_record_rate_hz": session.record_rate_hz,
@@ -269,7 +284,11 @@ def finalize_teleop_episode_recording(
                 "success": episode_success,
                 "score": episode_score,
                 "episode_notes": episode_notes,
+                "recording_status": recording_status,
+                "recording_error": recording_error,
             },
+            close_writers=close_writers,
         )
     except Exception:
         result.recorder.close()
+        raise

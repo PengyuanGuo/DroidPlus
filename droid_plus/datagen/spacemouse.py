@@ -1,4 +1,4 @@
-"""SpaceMouse input and bounded differential IK for Franka teleoperation."""
+"""SpaceMouse input and bounded differential IK for Franka teleoperation (XYZ + roll/pitch/yaw)."""
 from __future__ import annotations
 
 import argparse
@@ -15,6 +15,10 @@ class SpaceMouseConfig:
     angular_speed: float = 0.3  # rad/s, vector norm
     joint_speed: float = 0.5  # rad/s per joint; 10 cm/s needs up to ~0.34 near home
     deadzone: float = 0.1
+    # Pushing the cap tilts it (~0.3 of full scale); a larger rotation dead zone keeps
+    # translation pushes from also rotating the gripper.
+    rotation_deadzone: float = 0.35
+    rotation: str = "full"  # full: roll, pitch and yaw; yaw: hold the starting tilt
     timeout: float = 0.25
     button_mode: str = "clutch"
     enable_button: int = 0
@@ -24,12 +28,16 @@ class SpaceMouseConfig:
     def __post_init__(self):
         if self.button_mode not in ('clutch', 'deoxys'):
             raise ValueError('button_mode must be clutch or deoxys')
+        if self.rotation not in ('full', 'yaw'):
+            raise ValueError('rotation must be full or yaw')
         for name in ('linear_speed', 'angular_speed', 'joint_speed', 'timeout'):
             value = getattr(self, name)
             if not np.isfinite(value) or value <= 0:
                 raise ValueError(f'{name} must be finite and positive')
-        if not np.isfinite(self.deadzone) or not 0 <= self.deadzone < 1:
-            raise ValueError('deadzone must be in [0, 1)')
+        for name in ('deadzone', 'rotation_deadzone'):
+            value = getattr(self, name)
+            if not np.isfinite(value) or not 0 <= value < 1:
+                raise ValueError(f'{name} must be in [0, 1)')
         if self.enable_button < 0 or self.gripper_button < 0 or self.enable_button == self.gripper_button:
             raise ValueError('Enable and gripper buttons must be distinct nonnegative indices')
         if sorted(abs(x) for x in self.axis_map) != list(range(1, 7)):
@@ -41,8 +49,10 @@ def axis_twist(axes, config):
     if axes.shape != (6,) or not np.all(np.isfinite(axes)):
         raise ValueError('Invalid SpaceMouse axes')
     axes = np.array([np.sign(i) * axes[abs(i) - 1] for i in config.axis_map])
-    axes = np.sign(axes) * np.maximum(np.abs(axes) - config.deadzone, 0) / (1 - config.deadzone)
-    axes[3:5] = 0.0  # XYZ translation and base-frame yaw only.
+    deadzone = np.array([config.deadzone] * 3 + [config.rotation_deadzone] * 3)
+    axes = np.sign(axes) * np.maximum(np.abs(axes) - deadzone, 0) / (1 - deadzone)
+    if config.rotation == 'yaw':
+        axes[3:5] = 0.0  # XYZ translation and base-frame yaw only.
     for group, speed in ((slice(0, 3), config.linear_speed), (slice(3, 6), config.angular_speed)):
         axes[group] *= speed / max(1.0, np.linalg.norm(axes[group]))
     return axes
@@ -167,7 +177,8 @@ class CartesianController:
         twist = np.asarray(twist, dtype=float).copy()
         if twist.shape != (6,) or not np.all(np.isfinite(twist)):
             raise ValueError('Invalid Cartesian twist')
-        twist[3:5] = 0.0
+        if self.config.rotation == 'yaw':
+            twist[3:5] = 0.0
         measured = np.asarray(measured, dtype=float)
         if measured.shape != (7,) or not np.all(np.isfinite(measured)):
             raise RuntimeError('Invalid measured joint state')
@@ -189,8 +200,9 @@ class CartesianController:
         self.status = 'holding (enable released)' if not enabled else 'centered / dead zone'
         if enabled and np.any(twist):
             self.pin.framesForwardKinematics(self.model, self.data, self.full_q(self.q))
-            desired_orientation = self.pin.exp3(np.array([0., 0., twist[5] * dt])) @ self.orientation
-            # Hold initial tilt; integrate only base-frame yaw. Correct numerical IK drift.
+            # Integrate the base-frame angular velocity (yaw only in yaw mode, which holds the
+            # starting tilt) and servo toward it, correcting numerical IK drift.
+            desired_orientation = self.pin.exp3(twist[3:] * dt) @ self.orientation
             twist[3:] = self.pin.log3(desired_orientation @ self.data.oMf[self.frame].rotation.T) / dt
             jac = self.pin.computeFrameJacobian(
                 self.model, self.data, self.full_q(self.q), self.frame,
@@ -202,7 +214,7 @@ class CartesianController:
             if self.safe(candidate):
                 self.q = candidate
                 self.orientation = desired_orientation
-                self.status = "moving XYZ+yaw"
+                self.status = "moving"
             else:
                 self.status = "target rejected: joint limit or height floor"
         return self.q.copy(), gripper_percent
@@ -216,7 +228,11 @@ def add_controller_arguments(parser: argparse.ArgumentParser):
     parser.add_argument('--linear-speed', type=float, default=0.10, help='SpaceMouse translation limit, m/s')
     parser.add_argument('--angular-speed', type=float, default=0.3, help='SpaceMouse rotation limit, rad/s')
     parser.add_argument('--joint-speed', type=float, default=0.5, help='SpaceMouse joint speed limit, rad/s')
-    parser.add_argument('--deadzone', type=float, default=0.1)
+    parser.add_argument('--deadzone', type=float, default=0.1, help='Translation dead zone (fraction of full scale)')
+    parser.add_argument('--rotation-deadzone', type=float, default=0.35,
+                        help='Rotation dead zone; above the ~0.3 tilt a translation push produces')
+    parser.add_argument('--rotation', choices=['full', 'yaw'], default='full',
+                        help='full: roll, pitch and yaw follow the cap; yaw: hold the starting tilt')
     parser.add_argument('--input-timeout', type=float, default=0.25)
     parser.add_argument('--enable-button', type=int, default=0, help='Hold to enable motion (zero-based)')
     parser.add_argument('--gripper-button', type=int, default=1, help='Toggle gripper while enabled (zero-based)')
@@ -229,7 +245,8 @@ def connect_controller(args, *, settle_s=0.0):
         return connect_so101(args.port, settle_s=settle_s)
     config = SpaceMouseConfig(
         button_mode=args.button_mode, linear_speed=args.linear_speed, angular_speed=args.angular_speed,
-        joint_speed=args.joint_speed, deadzone=args.deadzone, timeout=args.input_timeout,
+        joint_speed=args.joint_speed, deadzone=args.deadzone, rotation_deadzone=args.rotation_deadzone,
+        rotation=args.rotation, timeout=args.input_timeout,
         enable_button=args.enable_button, gripper_button=args.gripper_button,
         axis_map=tuple(int(x) for x in args.axis_map.split(',')),
     )

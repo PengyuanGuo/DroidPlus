@@ -1,0 +1,17 @@
+cd /home/atomic/Project/DroidPlus
+export FRANKA_URDF_PATH="$PWD/models/franka_panda/panda.urdf"
+
+.venv/bin/python scripts/run_spacemouse_drawer_6phase_ui.py \
+  --gripper franka \
+  --franky-service-url http://192.168.9.167:54321 \
+  --left-camera-id 31262010 \
+  --wrist-camera-id 14633207 \
+  --web-port 54325 \
+  --rate-hz 100 \
+  --record-rate-hz 15 \
+  --output-dir output/spacemouse_drawer_6phase
+
+# Open http://localhost:54325 and click Start Episode.
+# Center the cap with both buttons released to arm.
+# Hold button 0 to move; while holding it, tap button 1 to toggle the gripper.
+# Select phases 0–5 in the UI or terminal. Stop Episode saves meta.json.

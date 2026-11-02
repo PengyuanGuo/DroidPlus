@@ -41,6 +41,8 @@ GUIDED_STEPS = [
     ("push the cap toward robot +X: the way the gripper moves AWAY from the robot base", 0, (0, 1, 2)),
     ("push the cap toward robot +Y: the robot's LEFT (looking from the base toward the gripper)", 1, (0, 1, 2)),
     ("pull the cap UP (robot +Z)", 2, (0, 1, 2)),
+    ("tilt the cap to the robot's RIGHT: its top toward robot -Y (robot +roll)", 3, (3, 4, 5)),
+    ("tilt the cap FORWARD: its top toward robot +X (robot +pitch)", 4, (3, 4, 5)),
     ("twist the cap COUNTER-CLOCKWISE seen from above (robot +yaw)", 5, (3, 4, 5)),
 ]
 
@@ -48,7 +50,8 @@ GUIDED_STEPS = [
 def config_from_args(args) -> SpaceMouseConfig:
     return SpaceMouseConfig(
         button_mode=args.button_mode, linear_speed=args.linear_speed, angular_speed=args.angular_speed,
-        joint_speed=args.joint_speed, deadzone=args.deadzone, enable_button=args.enable_button,
+        joint_speed=args.joint_speed, deadzone=args.deadzone, rotation_deadzone=args.rotation_deadzone,
+        rotation=args.rotation, enable_button=args.enable_button,
         gripper_button=args.gripper_button, axis_map=tuple(int(x) for x in args.axis_map.split(",")),
     )
 
@@ -125,7 +128,8 @@ def _capture(reader, config, duration, rate_hz, writer, t_start, label=""):
             last_print = tick
             sys.stdout.write(
                 f"\r t={tick - t_start:6.2f}s raw=[{' '.join(f'{a:+.2f}' for a in axes)}] "
-                f"btn={list(buttons)} xyz=[{' '.join(f'{v:+.3f}' for v in twist[:3])}] yaw={twist[5]:+.3f}   "
+                f"btn={list(buttons)} xyz=[{' '.join(f'{v:+.3f}' for v in twist[:3])}] "
+                f"rpy=[{' '.join(f'{v:+.2f}' for v in twist[3:])}]   "
             )
             sys.stdout.flush()
         time.sleep(max(0.0, period - (time.monotonic() - tick)))
@@ -176,11 +180,9 @@ def _guided_report(rows_by_step, current_map):
               f"  (mean {means}; {consistency:.0%} consistent)")
         axis_map[base] = sign * (raw + 1)
     used = [abs(a) for a in axis_map if a is not None]
-    if not ok or len(set(used)) != 4:
+    if not ok or len(set(used)) != 6:
         print("Mapping is ambiguous (mixed directions or repeated raw axis). Re-run, holding one clean motion per step.")
         return None
-    # Roll/pitch are discarded by the controller; any remaining raw axes keep the map a permutation.
-    axis_map[3], axis_map[4] = sorted(set(range(1, 7)) - set(used))
     result = ",".join(str(a) for a in axis_map)
     if tuple(axis_map) == tuple(current_map):
         print(f"Current --axis-map={result} already matches.")
@@ -330,6 +332,8 @@ def main():
         p.add_argument("--angular-speed", type=float, default=0.3)
         p.add_argument("--joint-speed", type=float, default=0.5)
         p.add_argument("--deadzone", type=float, default=0.1)
+        p.add_argument("--rotation-deadzone", type=float, default=0.35)
+        p.add_argument("--rotation", choices=["full", "yaw"], default="full")
         p.add_argument("--enable-button", type=int, default=0)
         p.add_argument("--gripper-button", type=int, default=1)
         p.add_argument("--axis-map", default="1,2,3,4,5,6")

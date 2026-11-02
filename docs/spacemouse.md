@@ -1,22 +1,32 @@
 # SpaceMouse teleoperation
 
 Drive the Franka Panda with a USB SpaceMouse (tested: SpaceMouse Compact) instead of
-the SO-101 leader arm. The SpaceMouse commands end-effector **XYZ translation and yaw**
-in the robot base frame; roll/pitch are held at the starting tilt. Differential IK on
+the SO-101 leader arm. The SpaceMouse commands end-effector **XYZ translation and
+roll/pitch/yaw** in the robot base frame (`--rotation yaw` holds the starting tilt and
+only turns about vertical). Differential IK on
 the workstation turns this into joint targets streamed to the existing
 `franky_service` on the NUC, so recordings use the same 8-D joint+gripper
 state/action format, cameras, labels and phase annotations as SO-101 teleop
 (`meta.json` policy `teleop_spacemouse`).
 
-## Status (2026-10-29)
+Each episode contains `steps.jsonl`, camera images, and `meta.json`. Metadata is
+saved before hardware IO and refreshed when recording stops, before label prompts.
+Control or camera errors preserve the recorded steps and finalize metadata with
+`recording_status: interrupted`, the error, and `valid: false`. Normal completion
+saves the operator labels. A forced process kill can leave the initial checkpoint
+with `recording_status: recording` and an outdated step count.
+
+## Status (2026-11-02)
 
 | Area | State |
 | --- | --- |
 | Arm teleop, live | Working: ~99 Hz control, 4–10 ms NUC round trips, with and without the Franka Hand connected |
-| Recording | Working: 15 Hz, left camera (wrist ZED currently unplugged) |
-| Axis mapping | Verified on the rig: default `--axis-map=1,2,3,4,5,6` is correct |
-| Gripper toggle | Not yet exercised live |
-| Known issue | One `franky_service` hang during Hand `/connect`; restart cleared it (see Troubleshooting) |
+| Recording | Working: 15 Hz, left + wrist cameras |
+| Axis mapping | Verified on the rig for XYZ and yaw: default `--axis-map=1,2,3,4,5,6` is correct. Roll/pitch signs inferred from push cross-talk; confirm with `record --guided` |
+| Roll/pitch | Added (`--rotation full`, default); tested on the Panda model offline, not yet live |
+| Gripper toggle | Close worked live; long gripper sessions not yet verified |
+| NUC freezes | Several `franky_service` freezes with the Hand connected. A py-spy dump showed franky `move()` and joint-state reads deadlocked. `0a713ff` serializes robot calls and serves `/joint_state` from a cache; needs live confirmation |
+| Home pose | `HOME_POSITION` joint 7 is now π/4 (was 0) in `franky_client` and `franky_service` |
 
 ## Setup
 
@@ -60,10 +70,75 @@ make franky_service           # keep your usual env vars, e.g. FRANKY_ROBOT_IP
 `run_teleop_cli.py` / `run_teleop_ui.py --controller spacemouse` also work (the UI has no `--viser`).
 `--wrist-camera-id ''` skips the unplugged wrist camera; only cameras in use are waited for.
 
+### Six-phase drawer collection UI
+
+Use `.venv` for SpaceMouse; `.venv-teleop` is the SO-101 environment and does not
+include PySpaceMouse or Pinocchio on this workstation. With both cameras connected:
+
+```bash
+cd /home/atomic/Project/DroidPlus
+export FRANKA_URDF_PATH="$PWD/models/franka_panda/panda.urdf"
+.venv/bin/python scripts/run_spacemouse_drawer_6phase_ui.py \
+  --franky-service-url http://192.168.9.167:54321 \
+  --web-port 54325
+```
+
+Open `http://localhost:54325`. This launcher selects SpaceMouse and reuses the
+six-phase drawer profile, Franka Hand, left camera `31262010`, and wrist camera
+`14633207`. Both cameras must supply images. Click **Start Episode**, center the
+cap and release both buttons to arm, then use the SpaceMouse controls below.
+Select phases 0–5 with the UI buttons or terminal number keys. Click **Stop
+Episode**, then save valid/success/score/notes in the episode history.
+
+Recordings go to `output/spacemouse_drawer_6phase/` with camera images,
+`steps.jsonl` containing the six phase prompts, and `meta.json` identifying
+`teleop_spacemouse`. The full launch command is in `commands/spacemouse_6phase`.
+The existing launcher also works with `.venv/bin/python
+scripts/run_teleop_drawer_6phase_ui.py --controller spacemouse`.
+
+### Four-phase MARS crossword collection UI
+
+For MARS crossword collection, run:
+
+```bash
+export FRANKA_URDF_PATH="$PWD/models/franka_panda/panda.urdf"
+.venv/bin/python scripts/run_spacemouse_crossword_4phase_ui.py \
+  --franky-service-url http://192.168.9.167:54321 --web-port 54325
+```
+
+Open `http://localhost:54325`. This profile requires the same left/wrist cameras
+and Franka Hand as the drawer profile. It prefills the MARS instruction and uses
+four phase IDs: **0 pre-grasp, 1 grasp, 2 pre-place, 3 place**. By default collect
+the full word in one episode: repeat 0–3 for M, A, R, then S. Metadata checks for
+four complete cycles; each step saves the corresponding phase name. Use
+`--episode-mode letter` for one cycle per episode and edit the instruction to name
+the letter. Recordings go to `output/spacemouse_crossword_mars_4phase/`.
+See `commands/spacemouse_crossword_4phase` for the full command and controls.
+
+## Task launchers
+
+Web-UI launchers preset controller, gripper, cameras, task and phase names (saved per frame):
+
+| Script | Task | Phases |
+| --- | --- | --- |
+| `scripts/run_spacemouse_crossword_4phase_ui.py` | Spell MARS with letter tiles | pre-grasp, grasp, pre-place, place (x4) |
+| `scripts/run_spacemouse_drawer_6phase_ui.py` | Drawer/cube task (SpaceMouse version of `run_teleop_drawer_6phase_ui.py`) | six drawer/cube phases |
+| `scripts/run_spacemouse_drawer_chicken_6phase_ui.py` | Find the chicken leg in one of two drawers, place it in the blue bin (yaw-only by default) | 0 pre-open, 1 open-and-home, 2 pre-grasp, 3 grasp, 4 pre-place, 5 place |
+
+The drawer search branches after open-and-home, where the operator checks the drawer
+opened and looks for the leg: empty (left open) or not opened goes back to pre-open
+(other drawer or retry, `0 1 0 1 2 3 4 5`); leg seen goes to pre-grasp, grasp,
+pre-place, place (`0 1 2 3 4 5`), which ends the episode. Episodes are reviewed against these allowed transitions
+(`phase_transitions` in `meta.json`); other orders are flagged `needs_review`.
+Ready-to-run commands for each launcher are in `commands/` (e.g.
+`bash commands/spacemouse_drawer_chicken_6phase`, then open http://localhost:54325).
+
 ## Controls (default `--button-mode clutch`)
 
 1. SPACE starts an episode. Center the cap and release both buttons to arm.
-2. **Hold button 0** and push/pull the cap to translate, twist it for yaw. Release to hold the pose.
+2. **Hold button 0** and push/pull the cap to translate, twist it for yaw, tilt it for
+   roll/pitch (tilt right = roll toward robot -Y, tilt forward = pitch toward +X).
+   Release to hold the pose.
 3. **While holding button 0, tap button 1** to toggle the gripper (close, then open).
 4. ESC ends the episode; then answer the valid/success/score/notes prompts.
 
@@ -75,10 +150,12 @@ Speed scales with cap deflection. Alternative `--button-mode deoxys --gripper-bu
 | Option | Default | Meaning |
 | --- | --- | --- |
 | `--linear-speed` | 0.10 m/s | Max translation speed |
-| `--angular-speed` | 0.3 rad/s | Max yaw rate |
+| `--angular-speed` | 0.3 rad/s | Max rotation rate (roll/pitch/yaw vector norm) |
+| `--rotation` | `full` | `full`: roll, pitch and yaw; `yaw`: hold the starting tilt |
+| `--rotation-deadzone` | 0.35 | Rotation dead zone; a translation push tilts the cap ~0.3, which this ignores |
 | `--joint-speed` | 0.5 rad/s | Per-joint cap (10 cm/s needs up to ~0.34 near home) |
 | `--min-z` | 0.12 m | Flange height floor; Franka Hand fingertips are ~0.103 m lower (shared default with SO-101) |
-| `--deadzone` | 0.1 | Cap dead zone |
+| `--deadzone` | 0.1 | Translation dead zone |
 | `--input-timeout` | 0.25 s | Max age of active (non-zero) input |
 | `--axis-map` | `1,2,3,4,5,6` | Signed permutation: device x,y,z,roll,pitch,yaw to base x,y,z,rx,ry,rz |
 
@@ -97,7 +174,7 @@ the status shows `target rejected`. The height floor is not collision checking.
 
 | File | Role |
 | --- | --- |
-| `droid_plus/datagen/spacemouse.py` | HID reader thread, axis mapping, damped-least-squares IK (`CartesianController`) |
+| `droid_plus/datagen/spacemouse.py` | HID reader thread, axis mapping, damped-least-squares IK (`CartesianController`); rotations are integrated about base axes through the flange |
 | `droid_plus/datagen/spacemouse_runner.py` | Episode loop: 100 Hz control, recording, viser, diagnostics |
 | `droid_plus/datagen/async_target.py` | Posts the latest joint target from a worker; control never waits on HTTP |
 | `droid_plus/datagen/async_recording.py` | Camera and state recording worker (latest snapshot, no queue) |
@@ -123,5 +200,7 @@ after each Move finishes.
 | `SpaceMouse requires a valid URDF` | `export FRANKA_URDF_PATH=...panda.urdf` |
 | 15 s camera wait | Pass `--wrist-camera-id ''` for unplugged cameras |
 | Control ~9 Hz, `state_get_ms` ~200 with `--gripper franka` | NUC runs the old service (no width cache): restart it from this repo |
-| `Read timed out` on `/connect`, then every endpoint times out | `franky_service` hung (seen once during Hand connect). On the NUC run `py-spy dump --pid <PID>` to capture where it is stuck, then `kill -9` and restart |
+| `Read timed out` on `/connect`, then every endpoint times out | `franky_service` froze (franky deadlock, see Status). On the NUC run `sudo $(which py-spy) dump --pid <PID>` (or `kill -USR1 <PID>`, which prints all thread stacks to the service terminal) to capture where it is stuck, then `kill -9`, power-cycle the robot if Desk shows the Hand disconnected, activate FCI, restart |
+| Desk: "end-effector not connected" | Expected while a libfranka Hand connection is held; after a crash, kill the service. If it persists, power-cycle the robot |
+| Arm never moves, `Robot tracking error exceeds 0.15 rad` | NUC control loop not running (service started before FCI was active). Check `/health` `control_thread_alive`; restart the service after activating FCI |
 | Arm doesn't follow the cap | Button 0 must be held (clutch mode) |

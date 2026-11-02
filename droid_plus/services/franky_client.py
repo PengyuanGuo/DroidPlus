@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 from __future__ import annotations
 
+import math
 import time
 from typing import Any, List
 
@@ -10,7 +11,7 @@ import requests
 
 from droid_plus.constants import FRANKY_SERVICE_URL
 
-HOME_POSITION: List[float] = [ 0.0, -0.40, 0.0, -1.9,  0.0,  1.5, 0.0 ]
+HOME_POSITION: List[float] = [0.0, -0.40, 0.0, -1.9, 0.0, 1.5, math.pi / 4]
 # GRIPPER_MOUNT_POSITION: List[float] = [ 0.0, -0.40, 0.0, -1.9,  0.0,  2.8, 0.0 ]
 
 ALT_POSITION_1 = [ 0.0,  0.36324462, 0.0,  -1.97732031,  0.0,  2.44544444, 0.57125038]

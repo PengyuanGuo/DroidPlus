@@ -101,7 +101,7 @@ class TeleopVisualizer:
         self.measured.visible = measured is not None
         self.status.value = status
         self.input.value = (f"enable={'ON' if enabled else 'off'}  v=[{' '.join(f'{v:+.3f}' for v in twist[:3])}] m/s"
-                            f"  yaw={twist[5]:+.2f} rad/s")
+                            f"  rpy=[{' '.join(f'{w:+.2f}' for w in twist[3:])}] rad/s")
         self.gripper.value = "CLOSED" if gripper_closed else "open"
         self.pose.value = f"x={flange[0]:+.3f} y={flange[1]:+.3f} z={flange[2]:+.3f} m"
         self.height.value = (f"flange {flange[2] - self.min_z:+.3f} m above floor;"

@@ -31,13 +31,18 @@ Env:
 
 from __future__ import annotations
 
+import faulthandler
+import hashlib
 import logging
+import math
+import signal
 import os
 import threading
 import time
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from typing import Any, Optional
+from pathlib import Path
 
 import numpy as np
 import uvicorn
@@ -83,7 +88,7 @@ JOINT_STATE_CACHE_MAX_AGE_S = 0.1  # older cache -> /joint_state reads the robot
 ROBOT_LOCK_TIMEOUT_S = 0.2  # HTTP handlers never wait longer than this for the robot
 
 # Joint-space \"home\" pose (matches `franky_client.HOME_POSITION`).
-HOME_POSITION: list[float] = [0.0, -0.40, 0.0, -1.9, 0.0, 1.5, 0.0]
+HOME_POSITION: list[float] = [0.0, -0.40, 0.0, -1.9, 0.0, 1.5, math.pi / 4]
 
 
 LANDING_PAGE_HTML = """<!doctype html>
@@ -611,6 +616,7 @@ class AppState:
     # Diagnostic snapshots are replaced atomically; no extra control locks.
     target_timing: dict[str, Any] = field(default_factory=dict)
     control_timing: dict[str, Any] = field(default_factory=dict)
+    diagnostics: dict[str, Any] = field(default_factory=dict)
     control_heartbeat_s: float = 0.0  # wall time of the control loop's last iteration
     # Serializes every franky Robot call (move/state/recover). Reentrant because
     # recovery runs from inside locked sections.
@@ -1196,10 +1202,29 @@ def _control_loop(*, st: AppState, control_hz: int, timeout_s: float) -> None:
 
 
 
+def _configure_thread_diagnostics(interval_s: float = 0.0) -> dict[str, Any]:
+    """Enable stack dumps independent of HTTP, without touching robot state."""
+    if not math.isfinite(interval_s) or interval_s < 0:
+        raise ValueError('FRANKY_TRACEBACK_INTERVAL_S must be finite and nonnegative')
+    faulthandler.enable(all_threads=True)
+    stack_signal = getattr(signal, 'SIGUSR1', None)
+    if stack_signal is not None:
+        faulthandler.register(stack_signal, all_threads=True)
+    if interval_s > 0:
+        # C-level watchdog also works when a native call prevents Python threads running.
+        faulthandler.dump_traceback_later(interval_s, repeat=True)
+    info = {'pid': os.getpid(), 'source_sha256': hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+            'stack_dump_signal': 'SIGUSR1' if stack_signal is not None else None,
+            'traceback_interval_s': interval_s}
+    LOG.info('Franky thread diagnostics enabled: %s', info)
+    return info
+
+
 @asynccontextmanager
 async def _lifespan(app: FastAPI):
     """Initialize robot and start control thread."""
     logging.basicConfig(level=os.getenv("LOG_LEVEL", DEFAULT_LOG_LEVEL))
+    diagnostics = _configure_thread_diagnostics(_get_env_float("FRANKY_TRACEBACK_INTERVAL_S", 0.0))
 
     robot_ip = os.getenv("FRANKY_ROBOT_IP", DEFAULT_FRANKY_ROBOT_IP)
     control_hz = _get_env_int("CONTROL_HZ", DEFAULT_CONTROL_HZ)
@@ -1215,6 +1240,7 @@ async def _lifespan(app: FastAPI):
         last_control_error=None,
         command_timeout_s=timeout_s,
     )
+    st.diagnostics = diagnostics
     app.state.franky_state = st
     st.robot = franky.Robot(robot_ip)
     st.robot.relative_dynamics_factor = franky.RelativeDynamicsFactor(0.4, 0.3, 0.1)
@@ -1258,6 +1284,7 @@ async def _lifespan(app: FastAPI):
     try:
         yield
     finally:
+        faulthandler.cancel_dump_traceback_later()
         st.shutdown.set()
         if st.control_thread is not None:
             st.control_thread.join(timeout=2.0)
@@ -1320,6 +1347,7 @@ def health(request: Request):
         gripper_homed = bool(current_app_state.gripper_homed)
         gripper_err = current_app_state.gripper_last_error
     return {
+        "diagnostics": current_app_state.diagnostics,
         "target_timing": current_app_state.target_timing,
         "control_timing": current_app_state.control_timing,
         "robot_connected": current_app_state.robot is not None,

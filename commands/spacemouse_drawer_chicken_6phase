@@ -1,0 +1,19 @@
+cd /home/atomic/Project/DroidPlus
+export FRANKA_URDF_PATH="$PWD/models/franka_panda/panda.urdf"
+
+.venv/bin/python scripts/run_spacemouse_drawer_chicken_6phase_ui.py \
+  --franky-service-url http://192.168.9.167:54321 \
+  --web-port 54325 \
+  --record-rate-hz 15 \
+  --rotation yaw
+
+# Open http://localhost:54325; click Start Episode.
+# Center the SpaceMouse and release both buttons to arm.
+# Hold button 0 to move; while holding it, tap button 1 to toggle the gripper.
+# Motion: XYZ + yaw (twist the cap); tilt is held. Append --rotation full for roll/pitch.
+# Phases: 0=pre-open, 1=open-and-home, 2=pre-grasp, 3=grasp, 4=pre-place, 5=place.
+# In 1=open-and-home, check the drawer opened and whether the chicken leg is inside:
+#   empty (leave it open) or not opened -> 0 again (other drawer / retry); leg seen -> 2.
+# Leg in the first drawer:              0 1 2 3 4 5
+# Leg in the second drawer (or retry):  0 1 0 1 2 3 4 5
+# After 5=place, Stop Episode and save labels. Other orders are flagged needs_review.
