@@ -144,6 +144,13 @@ in the place phase the median is 12 px with 7% of frames over 25 px, and in the 
 MolmoPoint on the wrist image: 0.6 s per call (A100, bf16, 18.5 GB); cubes within 25 px on 98% of calls,
 slots 72%. SAM 2 tiny streaming: 33 ms per frame (base_plus 42 ms).
 
+## Full crossword set
+
+`data/annotated/spacemouse_crossword_mars_4phase` (55 episodes, 84,282 frames) is labelled with the test-set calibration
+(copied to its root): 98% visible, 440 target windows. The two sessions not in the test set (171405, 172050) were
+checked by eye. zarr: `data/convert_zarr/droidplus_crossword_mars_4phase_wrist.zarr`; dp run
+`runs/dp_crossword_mars_4phase_wrist` (atomic_policy `real_deploy/train_realworld.md`).
+
 ## Limits
 
 - **Static targets until contact.** A cube pushed during the approach is labelled where it was grasped, i.e. at
