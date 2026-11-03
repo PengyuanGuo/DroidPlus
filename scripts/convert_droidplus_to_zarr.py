@@ -92,6 +92,21 @@ def transform_points(points: np.ndarray, source_roi, output_roi, width: int, hei
     return np.clip(mapped, 0, 1).astype(np.float32)
 
 
+def map_wrist_points(rows: list[dict], wrist_roi, wrist_shape) -> tuple[np.ndarray, np.ndarray]:
+    """Wrist points (normalized raw wrist image, from annotate_wrist_points.py) -> normalized wrist_cam crop.
+    Frames whose target is not visible, or falls outside the crop, get [-1, -1] and visible = False."""
+    height, width = wrist_shape[:2]
+    x, y, size = validate_roi(wrist_roi, width, height)
+    raw = np.asarray([r["wrist_point_pixel"] for r in rows], dtype=np.float64)
+    visible = np.asarray([bool(r["wrist_point_visible"]) for r in rows])
+    if raw.shape != (len(rows), 2) or not np.isfinite(raw).all():
+        raise ValueError("invalid wrist_point_pixel values")
+    crop = np.stack([(raw[:, 0] * width - x) / size, (raw[:, 1] * height - y) / size], 1)
+    visible &= np.all((crop >= 0) & (crop <= 1), axis=1)
+    crop[~visible] = -1.0
+    return crop.astype(np.float32), visible
+
+
 def resized_rgb(image: np.ndarray, roi) -> np.ndarray:
     x, y, size = validate_roi(roi, image.shape[1], image.shape[0])
     return cv2.resize(image[y:y + size, x:x + size], (SIZE, SIZE), interpolation=cv2.INTER_AREA)
@@ -187,6 +202,11 @@ def load_episode(path: Path, output_roi=None, wrist_roi=None, task_prompt=None, 
     left_roi = validate_roi(output_roi if output_roi is not None else (source_roi if source_roi is not None else center_roi(width, height)), width, height)
     wrist_crop = validate_roi(wrist_roi if wrist_roi is not None else center_roi(wrist_shape[1], wrist_shape[0]), wrist_shape[1], wrist_shape[0])
     mapped = transform_points(points_array, source_roi, left_roi, width, height)
+    wrist_data = {}
+    if all("wrist_point_pixel" in r and "wrist_point_visible" in r for r in rows):
+        wrist_data["wrist_point_pixel"], wrist_data["wrist_point_visible"] = map_wrist_points(rows, wrist_crop, wrist_shape)
+    elif any("wrist_point_pixel" in r for r in rows):
+        raise ValueError(f"{path}: wrist_point_pixel on some frames only; rerun scripts/annotate_wrist_points.py")
     instruction = task_prompt if task_prompt is not None else (meta.get("instruction") or meta.get("task"))
     if not isinstance(instruction, str) or not instruction.strip():
         raise ValueError(f"{path}: missing episode instruction/task; supply --task-prompt")
@@ -212,6 +232,7 @@ def load_episode(path: Path, output_roi=None, wrist_roi=None, task_prompt=None, 
             "prompt": np.repeat(encode_text(instruction)[None], n, axis=0),
             "timestamp": np.asarray(timestamps, dtype=np.float64) - timestamps[0],
             "source_seq": np.asarray(seqs, dtype=np.int64), "point_needs_review": reviews,
+            **wrist_data,
         },
         "manifest": {
             "source_steps": str(path.resolve()), "source_sha256": input_sha,
@@ -256,7 +277,7 @@ def preflight(root: Path, *, roi=None, wrist_roi=None, max_episodes=0, task_prom
     return episodes
 
 
-def create_store(path: Path, n: int, ends: np.ndarray, chunk_frames: int):
+def create_store(path: Path, n: int, ends: np.ndarray, chunk_frames: int, wrist_points: bool = False):
     try:
         import numcodecs
         import zarr
@@ -280,7 +301,7 @@ def create_store(path: Path, n: int, ends: np.ndarray, chunk_frames: int):
         ("phase_prompt", (n, TEXT_LEN), "uint8"), ("prompt", (n, TEXT_LEN), "uint8"),
         ("timestamp", (n,), "float64"), ("source_seq", (n,), "int64"),
         ("point_needs_review", (n,), "bool"),
-    ):
+    ) + ((("wrist_point_pixel", (n, 2), "float32"), ("wrist_point_visible", (n,), "bool")) if wrist_points else ()):
         arrays[key] = create(data, key, shape, dtype, (1000,) + shape[1:])
     for camera in ("agent_view", "wrist_cam"):
         arrays[camera] = create(data, camera, (n, SIZE, SIZE, 3), "uint8", (chunk_frames, SIZE, SIZE, 3))
@@ -307,7 +328,11 @@ def convert(episodes: list[dict], output: Path, *, chunk_frames=100, overwrite=F
     output.parent.mkdir(parents=True, exist_ok=True)
     staging = Path(tempfile.mkdtemp(prefix=f".{output.name}.incomplete-", dir=output.parent))
     try:
-        root, arrays = create_store(staging, n, ends, chunk_frames)
+        has_wrist = {"wrist_point_pixel" in e["data"] for e in episodes}
+        if len(has_wrist) > 1:
+            raise ValueError("Some episodes have wrist points and some do not; run scripts/annotate_wrist_points.py on the whole dataset")
+        has_wrist = has_wrist.pop()
+        root, arrays = create_store(staging, n, ends, chunk_frames, wrist_points=has_wrist)
         offset = 0
         for index, episode in enumerate(episodes):
             if sha256(episode["path"]) != episode["sha256"] or sha256(episode["report_path"]) != episode["report_sha256"]:
@@ -341,6 +366,7 @@ def convert(episodes: list[dict], output: Path, *, chunk_frames=100, overwrite=F
             "training_loader": "atomic_policy.dataset.molmobot_pnp_color_phase_dataset.MolmoBotPnPColorPhaseDataset",
             "image_size": SIZE, "agent_roi_xy_size": episodes[0]["left_roi"],
             "wrist_roi_xy_size": episodes[0]["wrist_roi"],
+            **({"wrist_point_coordinate_system": "normalized xy in wrist_cam square ROI; [-1, -1] and wrist_point_visible=False when not visible"} if has_wrist else {}),
             "agent_raw_image_hw": list(episodes[0]["left_shape"][:2]),
             "wrist_raw_image_hw": list(episodes[0]["wrist_shape"][:2]),
             "image_color_space": "RGB", "data_image_layout": "NHWC", "cache_image_layout": "NCHW",

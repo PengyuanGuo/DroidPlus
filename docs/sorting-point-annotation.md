@@ -65,6 +65,9 @@ Training prompts are then rewritten in atomic_policy (`real_deploy/relabel_drawe
 `real_deploy/relabel_crossword_mars_prompts.py`), e.g. `open the left drawer and home` and
 `pre-place to slot 3`. Each script keeps the originals as `*.prompt_orig`.
 
+Wrist-camera points (per frame, for training and real-time deployment) are a separate step on top of these
+annotations: see `docs/wrist-camera-points.md`.
+
 ## Environment
 
 Use a working CUDA GPU. The workspace used to prepare this script did not have
