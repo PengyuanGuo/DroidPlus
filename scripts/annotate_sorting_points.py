@@ -410,6 +410,73 @@ def ground_letter_episode(grounder, episode: Path, rows: list[dict], segments: l
     return results
 
 
+# Block-stacking recordings: plain "pre-grasp"/"grasp"/"pre-place"/"place" cycles like the crossword,
+# detected from meta.json's instruction ("... in the order of red, yellow, blue from bottom to top").
+# Cycle k picks order[k + 1] and places it onto order[k] (the current top of the stack).
+STACK_INSTRUCTION = re.compile(r"order of (\w+), (\w+), (\w+) from bottom to top")
+
+
+def stack_order(episode: Path) -> list[str] | None:
+    try:
+        instruction = json.loads((episode / "meta.json").read_text()).get("instruction") or ""
+    except (OSError, ValueError):
+        return None
+    match = STACK_INSTRUCTION.search(instruction) if "stack" in instruction.lower() else None
+    return [color.lower() for color in match.groups()] if match else None
+
+
+def block_prompts(color: str) -> tuple[str, str]:
+    return f"Point to the {color} block", f"Point to the {color} cube"
+
+
+def ground_stack_episode(grounder, episode: Path, rows: list[dict], segments: list[dict], args, log=lambda *a: None) -> list[dict]:
+    order = stack_order(episode)
+    if not order or len(segments) != 4 * (len(order) - 1):
+        raise ValueError(f"{episode}: {len(segments) // 4} cycles but stacking order {order} needs {len(order or []) - 1}")
+    near = lambda q, r: (lambda point: np.hypot(*(point - np.asarray(q))) <= r)
+    results = []
+    stack = None  # point of the first base block; later placements must land on this stack
+    for cycle in range(len(order) - 1):
+        moved, base = order[cycle + 1], order[cycle]
+        pre_grasp, grasp, pre_place, place = segments[4 * cycle:4 * cycle + 4]
+        grab = {"molmo_prompt": block_prompts(moved)[0], "fallback_prompt": block_prompts(moved)[1]}
+        onto = {"molmo_prompt": block_prompts(base)[0], "fallback_prompt": block_prompts(base)[1]}
+        tag = {"stack_cycle": cycle, "moved_block": moved, "target_block": base}
+        # pre-grasp: the block to move, still on the table; it must not be part of the stack.
+        log(4 * cycle, pre_grasp)
+        off_stack = None if stack is None else (lambda point: not near(stack, 0.04)(point))
+        first = {**ground_segment(grounder, episode, rows, {**pre_grasp, **grab}, args, off_stack), **tag}
+        # grasp: the gripper covers the block; accept hits near the pre-grasp point, else copy it.
+        log(4 * cycle + 1, grasp)
+        if first["needs_review"]:
+            second = ground_segment(grounder, episode, rows, {**grasp, **grab}, args)
+        else:
+            second = ground_segment(grounder, episode, rows, {**grasp, **grab}, args, window(first["point_pixel"], (-0.06, 0.06), (-0.06, 0.06)))
+            if second["needs_review"]:
+                second = {**copy_segment(grasp, first, args), "preview_frame": second["preview_frame"]}
+        second.update(tag)
+        # pre-place: the block it goes onto (top of the stack); the carried block is in the gripper.
+        log(4 * cycle + 2, pre_place)
+        accept = lambda point: not near(first["point_pixel"], 0.03)(point) if not first["needs_review"] else True
+        if stack is not None:  # a stacked block sits above the base point in the image
+            on_stack = window(stack, (-0.06, 0.06), (-0.12, 0.04))
+            accept = (lambda a, b: lambda point: a(point) and b(point))(accept, on_stack)
+        third = {**ground_segment(grounder, episode, rows, {**pre_place, **onto}, args, accept), **tag}
+        if stack is None and not third["needs_review"]:
+            stack = third["point_pixel"]
+        # place: the gripper hides the target; accept hits near the pre-place point, else copy it.
+        log(4 * cycle + 3, place)
+        if third["needs_review"]:
+            fourth = ground_segment(grounder, episode, rows, {**place, **onto}, args)
+        else:
+            fourth = ground_segment(grounder, episode, rows, {**place, **onto}, args, window(third["point_pixel"], (-0.06, 0.06), (-0.06, 0.06)))
+            if fourth["needs_review"]:
+                fourth = {**copy_segment(place, third, args), "preview_frame": fourth["preview_frame"]}
+        fourth.update(tag)
+        results += [first, second, third, fourth]
+    return results
+
+
 def ground_segment(grounder, episode: Path, rows: list[dict], segment: dict, args, accept=None, samples=None) -> dict:
     if samples is None:
         # A window rejects most distractor hits, so draw more frames to keep enough candidates.
@@ -459,9 +526,22 @@ def ground_segment(grounder, episode: Path, rows: list[dict], segment: dict, arg
         **segment, "sample_indices": samples, "samples": attempts,
         "valid_predictions": len(points), "inliers": len(kept),
         "required_inliers": required, "point_pixel": point, "needs_review": not success,
-        # Draw the preview on a frame where the target was actually found.
-        "preview_frame": next((a["frame_index"] for a in attempts if "point_pixel" in a), samples[0]),
+        # Draw the preview on the frame whose prediction is closest to the final point,
+        # i.e. where the target is most clearly visible at the marked location.
+        "preview_frame": min((a for a in attempts if "point_pixel" in a),
+                             key=lambda a: np.hypot(*(np.asarray(a["point_pixel"]) - np.asarray(point))) if success else 0,
+                             default={"frame_index": samples[0]})["frame_index"],
     }
+
+
+def draw_point(image: np.ndarray, pixel: tuple[int, int]) -> None:
+    """Open-centre cross (white outline, red core): the target under the point stays visible."""
+    x, y = pixel
+    for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+        start, end = (x + 7 * dx, y + 7 * dy), (x + 20 * dx, y + 20 * dy)
+        cv2.line(image, start, end, (255, 255, 255), 6)
+    for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+        cv2.line(image, (x + 8 * dx, y + 8 * dy), (x + 19 * dx, y + 19 * dy), (0, 0, 255), 3)
 
 
 def atomic_text(path: Path, text: str) -> None:
@@ -480,6 +560,8 @@ def segment_label(segment: dict) -> str:
             label += f" ({segment['letter']})" if "slot" in prompt.split() else f" {segment['letter']}"
         if "slot" not in prompt.split():
             label += f" -> cell {segment['grid_cell']}"
+    if segment.get("moved_block"):
+        label += f" {segment['moved_block']}" if segment["phase_index"] < 2 else f" {segment['moved_block']} onto {segment['target_block']}"
     return label
 
 
@@ -501,7 +583,7 @@ def write_episode(path: Path, rows: list[dict], segments: list[dict], args) -> N
         x, y = segment["point_pixel"]
         if x >= 0:
             pixel = (min(width - 1, round(x * width)), min(height - 1, round(y * height)))
-            cv2.drawMarker(image, pixel, (0, 0, 255), cv2.MARKER_CROSS, 30, 3)
+            draw_point(image, pixel)
         label = segment_label(segment)
         text = label if x >= 0 else "FAILED: " + label
         cv2.putText(image, text, (12, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
@@ -559,7 +641,11 @@ def main() -> None:
     # Validate the entire selection before loading the model or writing files.
     for path in paths:
         rows, segments = read_episode(path)
-        if segments[0]["phase_prompt"] == LETTER_PHASES[0]:
+        if segments[0]["phase_prompt"] == LETTER_PHASES[0] and stack_order(path.parent):
+            order = stack_order(path.parent)
+            if len(segments) != 4 * (len(order) - 1):
+                parser.error(f"{path}: {len(segments) // 4} cycles but stacking order {order} needs {len(order) - 1}")
+        elif segments[0]["phase_prompt"] == LETTER_PHASES[0]:
             if not args.word:
                 parser.error(f"{path}: letter-cube recording; pass --word (e.g. --word MARS)")
             if len(segments) != 4 * len(args.word):
@@ -591,7 +677,9 @@ def main() -> None:
     for episode_index, path in enumerate(paths):
         rows, segments = read_episode(path)
         log = lambda number, segment: LOG.info("Episode %d/%d %s segment %d: %s", episode_index + 1, len(paths), path.parent.name, number, segment["phase_prompt"])
-        if segments[0]["phase_prompt"] == LETTER_PHASES[0]:
+        if segments[0]["phase_prompt"] == LETTER_PHASES[0] and stack_order(path.parent):
+            results = ground_stack_episode(grounder, path.parent, rows, segments, args, log)
+        elif segments[0]["phase_prompt"] == LETTER_PHASES[0]:
             results = ground_letter_episode(grounder, path.parent, rows, segments, args, log)
         elif segments[0]["phase_prompt"] == "pre-open":
             results = ground_chicken_episode(grounder, path.parent, rows, segments, args, log)

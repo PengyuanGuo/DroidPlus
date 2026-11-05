@@ -42,7 +42,19 @@ def segment_label(segment: dict) -> str:
             label += f" ({segment['letter']})" if "slot" in prompt.split() else f" {segment['letter']}"
         if "slot" not in prompt.split():
             label += f" -> cell {segment['grid_cell']}"
+    if segment.get("moved_block"):
+        label += f" {segment['moved_block']}" if segment["phase_index"] < 2 else f" {segment['moved_block']} onto {segment['target_block']}"
     return label
+
+
+def draw_point(image: np.ndarray, pixel: tuple[int, int]) -> None:
+    """Open-centre cross (white outline, red core): the target under the point stays visible."""
+    x, y = pixel
+    for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+        start, end = (x + 7 * dx, y + 7 * dy), (x + 20 * dx, y + 20 * dy)
+        cv2.line(image, start, end, (255, 255, 255), 6)
+    for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+        cv2.line(image, (x + 8 * dx, y + 8 * dy), (x + 19 * dx, y + 19 * dy), (0, 0, 255), 3)
 
 
 def prepare_correction(image: Path, expected_segment: int | None = None) -> dict:
@@ -213,7 +225,7 @@ def apply_correction(
     preview = cv2.cvtColor(context["rgb"], cv2.COLOR_RGB2BGR)
     height, width = preview.shape[:2]
     pixel = (min(width - 1, round(point[0] * width)), min(height - 1, round(point[1] * height)))
-    cv2.drawMarker(preview, pixel, (0, 0, 255), cv2.MARKER_CROSS, 30, 3)
+    draw_point(preview, pixel)
     cv2.putText(preview, segment_label(report["segments"][index]), (12, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
     ok, encoded = cv2.imencode(".jpg", preview)
     if not ok:
