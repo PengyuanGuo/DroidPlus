@@ -22,13 +22,21 @@ PHASE_LAYOUTS = {
     "four_phase": {"pre-grasp": 0, "grasp": 1, "pre-place": 2, "place": 3},
     "drawer_six_phase": {"grasp_handle_open": 0, "open_drawer_and_home": 1, "pick_cube_and_lift": 2,
                          "carry_place_and_home": 3, "grasp_handle_close": 4, "close_drawer_and_home": 5},
+    # drawer chicken search: (pre-open, open-and-home) once per drawer opened, then 2..5 (prompts carry the side)
+    "chicken_six_phase": {"pre-open": 0, "open-and-home": 1, "pre-grasp": 2, "grasp": 3, "pre-place": 4, "place": 5},
 }
 
 
 def phase_layout(path: Path, segments: list[dict]) -> str:
     """Two-phase: 0,1 x3 segments. Four-phase: complete 0,1,2,3 cycles (one per object).
-    Drawer six-phase: one 0..5 sequence (open drawer, put cube in, close drawer)."""
+    Drawer six-phase: one 0..5 sequence (open drawer, put cube in, close drawer).
+    Chicken six-phase: (0,1) once or more (one drawer after the other), then 2,3,4,5."""
     labels = [s["phase_index"] for s in segments]
+    if segments and segments[0]["phase_prompt"].startswith("pre-open"):
+        opens = len(labels) - 4
+        if opens < 2 or opens % 2 or labels != [0, 1] * (opens // 2) + [2, 3, 4, 5]:
+            raise ValueError(f"{path}: expected chicken phases (0,1)+ then 2,3,4,5; got {labels}")
+        return "chicken_six_phase"
     if segments and segments[0]["phase_prompt"] == "grasp_handle_open":
         expected = PHASE_LAYOUTS["drawer_six_phase"]
         if [(s["phase_prompt"], s["phase_index"]) for s in segments] != list(expected.items()):

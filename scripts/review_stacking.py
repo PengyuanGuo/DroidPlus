@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
-"""Review page for stacking point labels: left MolmoPoint points + wrist projections, with the stacking_qa.py flags.
+"""Review page for point labels: left MolmoPoint points + wrist projections, with the automatic QA flags.
 
     python scripts/stacking_qa.py --dataset-root DATASET          # flags -> DATASET/stacking_qa.json
     python scripts/review_stacking.py --dataset-root DATASET --port 18765
     open http://localhost:18765
+Drawer chicken search (same page, reviews saved to DATASET/drawer_review.json):
+    python scripts/drawer_qa.py --dataset-root DATASET            # flags -> DATASET/drawer_qa.json
+    python scripts/review_stacking.py --dataset-root DATASET --qa drawer_qa.json --title "Drawer label review" --port 18766
 
 Per episode: stack order, flags, the 8 phase points on their left preview frames, the 4 wrist targets at three
 frames each, and a frame player (left | wrist, both points drawn). Mark each point OK / needs fix; in fix mode a
@@ -22,14 +25,15 @@ from urllib.parse import parse_qs, urlparse
 LOCK = threading.Lock()
 
 
-def build(root: Path):
-    qa = json.loads((root / "stacking_qa.json").read_text())
-    return qa
+def build(root: Path, qa_name: str = "stacking_qa.json"):
+    return json.loads((root / qa_name).read_text())
 
 
 class Handler(BaseHTTPRequestHandler):
     root: Path
     qa: dict
+    review_name = "stacking_review.json"
+    title = "Stacking label review"
 
     def log_message(self, *a):
         pass
@@ -44,18 +48,18 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(b)
 
     def review(self):
-        p = self.root / "stacking_review.json"
+        p = self.root / self.review_name
         return json.loads(p.read_text()) if p.exists() else {}
 
     def do_GET(self):
         u = urlparse(self.path)
         q = parse_qs(u.query)
         if u.path == "/":
-            return self.send(200, PAGE, "text/html; charset=utf-8")
+            return self.send(200, PAGE.replace("Stacking label review", self.title), "text/html; charset=utf-8")
         if u.path == "/api/list":
             with LOCK:
                 rev = self.review()
-            items = [{"ep": k, "variant": v["stack_variant"], "flags": len(v["flags"]), "frames": v["frames"]}
+            items = [{"ep": k, "variant": v.get("stack_variant") or v.get("variant") or "", "flags": len(v["flags"]), "frames": v["frames"]}
                      for k, v in self.qa.items()]
             return self.send(200, json.dumps({"episodes": items, "review": rev}))
         if u.path == "/api/ep":
@@ -85,9 +89,9 @@ class Handler(BaseHTTPRequestHandler):
         with LOCK:
             rev = self.review()
             rev[body["ep"]] = body["data"]
-            tmp = self.root / "stacking_review.json.tmp"
+            tmp = self.root / (self.review_name + ".tmp")
             tmp.write_text(json.dumps(rev, indent=1))
-            tmp.replace(self.root / "stacking_review.json")
+            tmp.replace(self.root / self.review_name)
         self.send(200, "{}")
 
 
@@ -132,7 +136,7 @@ select,input{background:var(--panel);color:var(--ink);border:1px solid var(--lin
 <b>Stacking label review</b>
 <select id="filt"><option value="flagged">flagged (second look)</option><option value="all">all episodes</option>
 <option value="todo">not reviewed</option><option value="fix">marked needs fix</option></select>
-<select id="var"><option value="">all stack orders</option></select>
+<select id="var"><option value="">all variants</option></select>
 <div class="meta" id="count"></div><div class="kbd">j / k: next / previous episode · space: play</div>
 </div><div id="list"></div></div>
 <div id="main"><div class="meta">Pick an episode.</div></div>
@@ -147,14 +151,14 @@ const IMC={};function loadImg(src){if(!IMC[src]){const i=new Image();i.src=src;I
 function rev(){return REV[CUR]||(REV[CUR]={reviewed:false,note:'',segments:{},wrist:{}});}
 async function save(){await fetch('/api/review',{method:'POST',body:JSON.stringify({ep:CUR,data:rev()})});renderList();}
 async function init(){const j=await (await fetch('/api/list')).json();EPS=j.episodes;REV=j.review;
- [...new Set(EPS.map(e=>e.variant))].sort().forEach(v=>$('#var').add(new Option(v.split('<').join(' < '),v)));renderList();}
+ [...new Set(EPS.map(e=>e.variant))].sort().forEach(v=>$('#var').add(new Option(v.split('<').join(' < ')||'—',v)));if(EPS.filter(e=>e.flags).length<=3)$('#filt').value='all';renderList();}
 function status(e){const r=REV[e.ep];if(!r)return'';const s=Object.values(r.segments||{}).concat(Object.values(r.wrist||{}));
  if(s.some(x=>x.status==='fix'))return'fix';return r.reviewed?'ok':'';}
 function visible(){const f=$('#filt').value,v=$('#var').value;return EPS.filter(e=>(!v||e.variant===v)&&(f==='all'||(f==='flagged'&&e.flags)||(f==='todo'&&!(REV[e.ep]||{}).reviewed)||(f==='fix'&&status(e)==='fix')));}
 function renderList(){const vs=visible();$('#count').textContent=`${vs.length} shown · ${EPS.filter(e=>e.flags).length} flagged · ${EPS.filter(e=>(REV[e.ep]||{}).reviewed).length}/${EPS.length} reviewed`;
- $('#list').innerHTML=vs.map(e=>`<div class="ep ${e.ep===CUR?'on':''}" data-ep="${esc(e.ep)}"><span class="dot ${status(e)}"></span><span class="n" title="${esc(e.ep)}">${esc(e.ep.replace('stacking_4phase_teleop_20261102_',''))}</span>${stackHtml(e.variant)}${e.flags?`<span class="badge">${e.flags}</span>`:''}</div>`).join('');
+ $('#list').innerHTML=vs.map(e=>`<div class="ep ${e.ep===CUR?'on':''}" data-ep="${esc(e.ep)}"><span class="dot ${status(e)}"></span><span class="n" title="${esc(e.ep)}">${esc(e.ep.replace(/^.*_teleop_/,''))}</span>${stackHtml(e.variant)}${e.flags?`<span class="badge">${e.flags}</span>`:''}</div>`).join('');
  $('#list').querySelectorAll('.ep').forEach(d=>d.onclick=()=>open(d.dataset.ep));}
-function stackHtml(v){return `<span class="stack">${(v||'').split('<').map(c=>`<i style="background:${COL[c]}"></i>`).join('')}</span>`;}
+function stackHtml(v){if(!(v||'').includes('<'))return v?`<span class="badge" style="background:#2c3540;color:#e6ebf1">${esc(v)}</span>`:'';return `<span class="stack">${(v||'').split('<').map(c=>`<i style="background:${COL[c]}"></i>`).join('')}</span>`;}
 function cross(ctx,x,y,w,h,c,r=10){const path=()=>{ctx.beginPath();ctx.arc(x*w,y*h,r,0,7);ctx.moveTo(x*w-r-6,y*h);ctx.lineTo(x*w+r+6,y*h);ctx.moveTo(x*w,y*h-r-6);ctx.lineTo(x*w,y*h+r+6);};
  path();ctx.strokeStyle='#000';ctx.lineWidth=5;ctx.stroke();path();ctx.strokeStyle=c;ctx.lineWidth=2.5;ctx.stroke();}
 function draw(cv,src,pts){const im=loadImg(src);const go=()=>{cv.width=im.naturalWidth;cv.height=im.naturalHeight;const c=cv.getContext('2d');c.drawImage(im,0,0);
@@ -164,17 +168,17 @@ function renderEp(){const q=DATA.qa,r=rev();
  const segs=q.segments.map(s=>{const st=(r.segments[s.i]||{}).status||'',prop=(r.segments[s.i]||{}).point;
   return `<div class="card ${s.flags.length?'flagged':''} ${st}" data-i="${s.i}"><div class="p">${s.i+1}. ${esc(s.prompt)}</div>
   <canvas data-seg="${s.i}"></canvas>
-  <div class="meta">frame ${s.preview_frame} · ${s.copied_from!=null?'copied from phase '+s.copied_from:`inliers ${s.inliers??'—'}/${s.required??'—'}`} · colour ${Math.round(100*s.colour_share)}%${s.stack_shift!=null?` · stack shift ${s.stack_shift}`:''}</div>
+  <div class="meta">frame ${s.preview_frame} · ${s.copied_from!=null?'copied from phase '+s.copied_from:`inliers ${s.inliers??'—'}/${s.required??'—'}`} ${s.colour_share!=null?` · ${esc(s.colour)} colour ${Math.round(100*s.colour_share)}%`:''}${s.handle_shift!=null?` · from session median ${s.handle_shift}`:''}${s.stack_shift!=null?` · stack shift ${s.stack_shift}`:''}</div>
   ${s.flags.map(f=>`<div class="flagtxt">⚑ ${esc(f)}</div>`).join('')}${prop?`<div class="meta">proposed point ${prop.map(v=>v.toFixed(3)).join(', ')}</div>`:''}
   <div class="btns"><button class="okb ${st==='ok'?'on':''}" data-s="ok">OK</button><button class="fixb ${st==='fix'?'on':''}" data-s="fix">Needs fix</button>${st==='fix'?'<span class="meta">click the image to propose a point</span>':''}</div></div>`;}).join('');
  const wins=q.wrist_windows.map(w=>{const st=(r.wrist[w.k]||{}).status||'';const end=w.contact||w.end;
   const fr=[w.start,Math.round(w.start+0.5*(end-w.start)),Math.max(w.start,end-6)];
-  return `<div class="card ${w.flags.length?'flagged':''} ${st}" data-k="${w.k}"><div class="p">wrist ${w.k+1}: ${w.role==='object'?'grasp':'stack target'} · ${esc(w.colour)} block</div>
+  return `<div class="card ${w.flags.length?'flagged':''} ${st}" data-k="${w.k}"><div class="p">wrist ${w.k+1}: ${w.label?esc(w.label):`${w.role==='object'?'grasp':'stack target'} · ${esc(w.colour)} block`}</div>
   <div class="wthumbs">${fr.map(f=>`<canvas data-wf="${f}"></canvas>`).join('')}</div>
-  <div class="meta">frames ${w.start}–${w.end} · contact ${w.contact??'none'} · visible ${Math.round(100*w.visible)}%${w.colour_hit!=null?` · on colour ${Math.round(100*w.colour_hit)}%`:''}${w.stack_dz_m!=null?` · vs 1st stack: ${(100*w.stack_dxy_m).toFixed(1)} cm side, ${(100*w.stack_dz_m).toFixed(1)} cm up`:''}</div>
+  <div class="meta">frames ${w.start}–${w.end} · ${w.role==='pulled'?'pull ends':'contact'} ${w.contact??'none'} · visible ${Math.round(100*w.visible)}%${w.colour_hit!=null?` · on colour ${Math.round(100*w.colour_hit)}%`:''}${w.stack_dz_m!=null?` · vs 1st stack: ${(100*w.stack_dxy_m).toFixed(1)} cm side, ${(100*w.stack_dz_m).toFixed(1)} cm up`:''}</div>
   ${w.flags.map(f=>`<div class="flagtxt">⚑ ${esc(f)}</div>`).join('')}
   <div class="btns"><button class="okb ${st==='ok'?'on':''}" data-s="ok">OK</button><button class="fixb ${st==='fix'?'on':''}" data-s="fix">Needs fix</button></div></div>`;}).join('');
- $('#main').innerHTML=`<div><h2>${stackHtml(q.stack_variant)}${esc(CUR)}</h2><div class="meta">cyan = label · orange = wrist target while the block is held · ${q.frames} frames · stack (bottom → top): ${esc((q.stack_variant||'').split('<').join(' → '))}</div></div>
+ $('#main').innerHTML=`<div><h2>${stackHtml(q.stack_variant||q.variant)}${esc(CUR)}</h2><div class="meta">cyan = label · orange = wrist target while held · ${q.frames} frames · ${q.header?esc(q.header):`stack (bottom → top): ${esc((q.stack_variant||'').split('<').join(' → '))}`}</div></div>
  ${q.flags.length?`<ul class="flags">${q.flags.map(f=>`<li>${esc(f)}</li>`).join('')}</ul>`:'<div class="meta">No automatic flags.</div>'}
  <div id="player"><div class="btns"><button id="play">▶ play</button><span class="meta" id="pinfo"></span></div>
  <div id="pv"><canvas id="pl"></canvas><canvas id="pw"></canvas></div><input type="range" id="scrub" min="0" max="${DATA.frames.length-1}" value="0"></div>
@@ -194,7 +198,7 @@ function renderEp(){const q=DATA.qa,r=rev();
  $('#next').onclick=()=>step(1);
  $('#scrub').oninput=e=>{frame=+e.target.value;drawFrame();};$('#play').onclick=togglePlay;drawFrame();}
 function drawFrame(){const fr=DATA.frames[frame];if(!fr)return;draw($('#pl'),img(fr[0]),[{xy:fr[3],c:'#00e5ff'}]);draw($('#pw'),img(fr[1]),[{xy:fr[4],c:fr[5]?'#ffa500':'#00e5ff',r:12}]);
- $('#pinfo').textContent=`frame ${frame} · ${DATA.prompts[fr[2]]}${fr[5]?' · block held':''}${fr[4]?'':' · wrist point not visible'}`;$('#scrub').value=frame;
+ $('#pinfo').textContent=`frame ${frame} · ${DATA.prompts[fr[2]]}${fr[5]?' · held':''}${fr[4]?'':' · wrist point not visible'}`;$('#scrub').value=frame;
  for(let k=1;k<=8;k++){const n=DATA.frames[frame+k];if(n){loadImg(img(n[0]));loadImg(img(n[1]));}}}
 function togglePlay(){if(timer){clearInterval(timer);timer=null;$('#play').textContent='▶ play';return;}$('#play').textContent='❚❚ pause';
  timer=setInterval(()=>{frame=(frame+2)%DATA.frames.length;drawFrame();},133);}
@@ -210,10 +214,14 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--dataset-root", type=Path, required=True)
     ap.add_argument("--port", type=int, default=18765)
+    ap.add_argument("--qa", default="stacking_qa.json", help="QA file in the dataset root (drawer: drawer_qa.json)")
+    ap.add_argument("--title", default="Stacking label review")
     a = ap.parse_args()
     Handler.root = a.dataset_root.resolve()
-    Handler.qa = build(Handler.root)
-    print(f"stacking review on http://localhost:{a.port}", flush=True)
+    Handler.qa = build(Handler.root, a.qa)
+    Handler.review_name = a.qa.replace("_qa", "_review")
+    Handler.title = a.title
+    print(f"{a.title} on http://localhost:{a.port}", flush=True)
     ThreadingHTTPServer(("127.0.0.1", a.port), Handler).serve_forever()
 
 

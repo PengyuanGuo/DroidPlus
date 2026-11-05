@@ -159,5 +159,29 @@ checked by eye. zarr: `data/convert_zarr/droidplus_crossword_mars_4phase_wrist.z
   and slots within 1 cm of the same height). Targets at varying heights need per-target heights.
 - **Gripper command, not state.** Contacts come from the commanded gripper. The recorded gripper *state* is stale
   while closed in the spacemouse data, so don't use it.
-- **Drawer and other tasks:** the window rule covers grasp, pull, release (drawer handle) and pick, place
-  (chicken leg, bin), but only crossword has been calibrated and replayed so far.
+- **Other tasks:** only crossword has been calibrated and replayed so far; stacking and drawer use its calibration.
+
+## Drawer chicken search (`--task drawer_chicken`, 2026-11-05)
+
+`data/annotated/spacemouse_drawer_chicken_6phase` (99 episodes: 50 from 2026-10-31, 49 from 2026-11-04) with the MARS
+calibration (copied to its root, sha256 b1e20b782317):
+
+    python scripts/annotate_wrist_points.py --dataset-root data/annotated/spacemouse_drawer_chicken_6phase \
+        --atomic-policy-root ../atomic_policy --task drawer_chicken --place-drop 0.03 --previews 3
+
+The generic close/open rule does not fit this task: the operator closes the gripper early in pre-open (16-45 cm before
+the handle), hooks the handle with closed fingers, pulls, and only reopens at the start of pre-grasp.
+`atomic_policy.wrist.targets.drawer_chicken_windows` sets the anchors explicitly:
+
+| Phase | Target | Anchor |
+|---|---|---|
+| pre-open | handle | fingertip at the last pre-open frame (the arm is stopped at the handle) |
+| open-and-home | handle (`pulled`) | slides with the fingertip along the pull (~15 cm along +y) until the largest horizontal travel before a 5 cm lift, then stays |
+| pre-grasp + grasp | chicken leg | the close in grasp that still holds at its end (3 episodes miss a first grasp and regrasp) |
+| pre-place + place | blue bin | first open in place, 3 cm below the fingertip |
+
+Result: 494 windows, 67,921 frames, visible 89%. Not visible only early in pre-open (handle out of view from home,
+68% of the phase visible) and early in pre-grasp (79%); every other phase 98-100%. Checked by eye on contact sheets of
+two- and one-drawer episodes from both days. Deployment: the tracker does not know the `pulled` role yet.
+Review page: `scripts/drawer_qa.py` (1 flag) + `scripts/review_stacking.py --qa drawer_qa.json --port 18766`; reviewed by the
+user 2026-11-05: left and wrist points accepted as they are (pre-open stays on the visible handle bar).

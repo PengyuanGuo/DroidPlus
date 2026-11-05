@@ -70,6 +70,9 @@ def main() -> None:
     ap.add_argument("--previews", type=int, default=0, help="write wrist_previews.mp4 for the first N episodes")
     ap.add_argument("--sam2-check", action="store_true", help="QA object windows against cached SAM 2 tracks")
     ap.add_argument("--review-px", type=float, default=20.0)
+    ap.add_argument("--task", choices=("generic", "drawer_chicken"), default="generic",
+                    help="drawer_chicken: handle at the end of pre-open, pulled with the fingertip in open-and-home "
+                         "(the gripper is closed through both), chicken at the grasp close, bin at the place open")
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args()
     sys.path.insert(0, str(args.atomic_policy_root.resolve()))
@@ -93,7 +96,7 @@ def main() -> None:
         cmd = np.array([r["action"]["positions"][7] for r in rows]) > 0.5
         phases = [r["phase_index"] for r in rows]
         T = panda_fk_batch(q)
-        lab = wrist_labels(cam, T, cmd, phases, args.place_drop)
+        lab = wrist_labels(cam, T, cmd, phases, args.place_drop, task=args.task)
         win_info = []
         for i, w in enumerate(lab["windows"]):
             info = {"segments": w.segments, "phases": [lab["segments"][k][0] for k in w.segments],
@@ -125,7 +128,7 @@ def main() -> None:
             ann = json.loads(ann_path.read_text())
             ann["wrist"] = {"method": "contact-anchored hindsight projection (atomic_policy.wrist.targets)",
                             "calibration": str(cal_path), "calibration_sha256": sha256(cal_path),
-                            "place_drop_m": args.place_drop, "point_coordinate_system": "normalized xy on full wrist RGB image",
+                            "place_drop_m": args.place_drop, "task": args.task, "point_coordinate_system": "normalized xy on full wrist RGB image",
                             "steps_sha256": sha256(path), "windows": win_info}
             ann_path.write_text(json.dumps(ann, indent=2) + "\n")
             if n_ep < args.previews:
