@@ -33,6 +33,9 @@ The recorder resets two things at the start of every episode, which is wrong for
   frames before the reopen after the last failed close, so the data shows closed empty gripper -> open -> adjust ->
   grasp and never the approach to a staged miss. Place recoveries that start held and drop the cube on purpose before
   re-grasping start 8 frames after that drop.
+- **Aborted take.** 212149/episode_004 (pre-grasp R) was re-recorded and its `steps.jsonl` still begins with 139
+  rows of the aborted first take (seq restarts at 0; their images were overwritten). Rows before the last seq reset
+  are dropped when the rest matches `meta.json` step_count (here 189); ee_trajectory is cut the same way.
 - **Letter / slot.** Read by eye from the wrist frames for every recovery episode (cube between the fingers at the end
   of pre-grasp/grasp, in the gripper at the start of pre-place/place) and written to `meta.json` `recovery`
   (`recover_..._phase1_06` was recorded twice: episode_005 = M, episode_006 = A). Slot = position in MARS.
@@ -59,7 +62,13 @@ Checks: every recovery point was checked on full-resolution crops (right letter 
 pre-grasp/grasp/place episodes, right slot for all 20 pre-place). Full episodes: 6 pre-grasp segments in session
 144222 failed because the "all cubes" query of the first frames missed that cube (the rejected hit was often exactly
 the cube); `fix_crossword_pregrasp_from_grasp.py` copies the grasp point of the same cycle (logged in
-`corrections`).
+`corrections`; 7 segments, 6 in 144222 and 1 in 203002). All 192 full-episode letter points were then checked on
+crops of the episode's first frame (cubes do not move before their grasp) and all 192 slot points on the end of
+pre-place. Two letter points were on a neighbouring cube (144222/episode_005 M on the A, 203002/episode_009 S on an
+O; the gripper lifts M / S and S ends in slot 4): re-grounded with MolmoPoint, accepting only hits near the lifted
+cube (method `regrounded_near_grasped_cube`, pre-grasp and grasp). One slot-1 point (194230/episode_014, x = 143.5
+px) lay just left of the shared crop and was set to the session's slot-1 median (155.7 px; method
+`slot_median_of_session`).
 
 ## Conversion
 

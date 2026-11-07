@@ -52,6 +52,17 @@ def read_jsonl(p: Path) -> list[dict]:
     return [json.loads(l) for l in p.read_text().splitlines() if l.strip()]
 
 
+def drop_stale_take(rows: list[dict], meta: dict) -> tuple[list[dict], int]:
+    """A re-recorded episode can keep the rows of an aborted earlier take in front (seq restarts at 0; their images
+    were overwritten). Keep the rows after the last seq reset when that matches meta step_count."""
+    resets = [i for i in range(1, len(rows)) if rows[i]["seq"] != rows[i - 1]["seq"] + 1]
+    if resets and len(rows) - resets[-1] == meta.get("step_count"):
+        return rows[resets[-1]:], resets[-1]
+    if resets:
+        raise ValueError(f"seq resets at {resets} that do not match step_count {meta.get('step_count')}")
+    return rows, 0
+
+
 def flips(cmd: list[int]) -> list[tuple[int, int]]:
     return [(i, cmd[i]) for i in range(1, len(cmd)) if cmd[i] != cmd[i - 1]]
 
@@ -67,7 +78,7 @@ def letter_for(phase: int, num: int, session: str, ep: str) -> str:
 
 def process_recovery(src: Path, dst: Path, phase: int, num: int, dry: bool) -> dict:
     session = src.parent.name.split("_")[-1]
-    rows = read_jsonl(src / "steps.jsonl")
+    rows, stale = drop_stale_take(read_jsonl(src / "steps.jsonl"), json.loads((src / "meta.json").read_text()))
     letter = letter_for(phase, num, session, src.name)
     cmd = [1 if r["action"]["positions"][7] > 0.5 else 0 for r in rows]
     held = phase == 2 or (phase == 3 and ((session, src.name) in PLACE_HELD or (session, "*") in PLACE_HELD))
@@ -90,7 +101,7 @@ def process_recovery(src: Path, dst: Path, phase: int, num: int, dry: bool) -> d
     info = {"phase": phase, "phase_name": PHASE_NAMES[phase], "letter": letter, "slot": WORD.index(letter) + 1,
             "recording": f"recover_Bigletter_mars_phase{phase}_{num:02d}", "start_held": held,
             "gripper_closed_until": fixed_until, "trim_start": start, "trim_reason": cut_reason,
-            "frames_orig": len(rows), "frames": len(rows) - start}
+            "frames_orig": len(rows), "frames": len(rows) - start, "stale_rows_dropped": stale}
     if dry:
         return info
     shutil.copytree(src, dst, dirs_exist_ok=True)
@@ -107,8 +118,8 @@ def process_recovery(src: Path, dst: Path, phase: int, num: int, dry: bool) -> d
     (dst / "steps.jsonl").write_text("".join(json.dumps(r) + "\n" for r in out))
     ee = json.loads((dst / "ee_trajectory.json.orig").read_text())
     for k, v in ee.items():
-        if isinstance(v, list) and len(v) == len(rows):
-            ee[k] = v[start:]
+        if isinstance(v, list) and len(v) in (len(rows), len(rows) + stale):
+            ee[k] = v[len(v) - len(rows):][start:]
     (dst / "ee_trajectory.json").write_text(json.dumps(ee))
     meta = json.loads((dst / "meta.json.orig").read_text())
     meta.update(step_count=len(out), recovery=info, word=WORD)
@@ -125,7 +136,7 @@ def main():
     report = {"full": [], "recovery": [], "excluded": []}
     for src in sorted(args.staging.glob("*/episode_*")):
         meta = json.loads((src / "meta.json").read_text())
-        rows = read_jsonl(src / "steps.jsonl")
+        rows, _ = drop_stale_take(read_jsonl(src / "steps.jsonl"), meta)
         rel = Path(src.parent.name) / src.name
         task = meta.get("task") or ""
         runs = [r["phase_index"] for i, r in enumerate(rows) if i == 0 or r["phase_index"] != rows[i - 1]["phase_index"]]
