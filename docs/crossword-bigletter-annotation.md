@@ -77,5 +77,22 @@ Same crops as `droidplus_crossword_mars_robot_4phase_wrist.zarr`, so both can be
     bash ../atomic_policy/real_deploy/convert_zarr.sh $D data/convert_zarr/droidplus_crossword_bigletter_4phase.zarr 148 0 376
 
 `convert_droidplus_to_zarr.py` accepts a single-phase episode when its `meta.json` has `recovery` (layout
-`four_phase`). Wrist points are not annotated yet (the co-training uses the left point only); recovery episodes will
-need an end-of-episode anchor for pre-grasp / pre-place, since they contain no gripper change to anchor on.
+`four_phase`).
+
+## Wrist-camera points (2026-11-07)
+
+    cp data/annotated/spacemouse_crossword_mars_4phase/wrist_camera_calibration.json $D/   # same rig, MARS calibration
+    python scripts/annotate_wrist_points.py --dataset-root $D --place-drop 0.03
+    bash ../atomic_policy/real_deploy/convert_zarr.sh $D data/convert_zarr/droidplus_crossword_bigletter_4phase_wrist.zarr 148 0 376
+
+Full episodes use the generic close/open rule (8 windows each). Recovery episodes start from a failed state, so the
+first gripper change is the wrong contact; `atomic_policy.wrist.targets.recovery_windows` sets one target per episode:
+
+| Phase | Target | Anchor |
+|---|---|---|
+| pre-grasp | letter cube | fingertip xy at the last frame, at the median close height of the full episodes (0.054 m); in full episodes pre-grasp ends 6 mm (median, p90 17 mm) from the later close in xy, 7.5 cm above it |
+| grasp | letter cube | the last durable close (staged misses before it are skipped) |
+| pre-place | slot | fingertip xy at the last frame, at the median place-target height (0.039 m); pre-place ends 5 mm from the later release, closer than the 2.2 cm spread of releases per slot |
+| place | slot | the last durable open, 3 cm below the fingertip (the misplaced cube may be picked up first) |
+
+Result: 144 episodes, 95,619 frames, visible 97%, 480 windows (pre-grasp recoveries from far-off start poses 39-100%). Checked by eye on wrist frames of all 96 recovery episodes and 12 full episodes: the point is on the right letter / slot number, and rides with the gripper once the cube is held.

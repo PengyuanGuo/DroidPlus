@@ -12,6 +12,10 @@ steps_molmo.jsonl.wrist_orig):
     wrist_point_visible  true if the target is in front of the camera and inside the wrist image
     wrist_point_held     true while the target object is in the gripper
 and a "wrist" block (calibration, targets, QA) to molmo_point_annotations.json.
+Recovery episodes (meta.json "recovery", crossword big letters): one phase each, starting from a failed state;
+targets from atomic_policy.wrist.targets.recovery_windows. Pre-grasp has no contact: the cube is the fingertip xy at
+the last frame at the median close height; pre-place: fingertip xy at the last frame at the median place-target
+height (both from the full episodes and place recoveries).
 QA: --sam2-check compares each object window with the SAM 2 tracks cached by the calibration and marks windows
 whose median disagreement exceeds --review-px as needs_review.
 
@@ -73,6 +77,9 @@ def main() -> None:
     ap.add_argument("--task", choices=("generic", "drawer_chicken"), default="generic",
                     help="drawer_chicken: handle at the end of pre-open, pulled with the fingertip in open-and-home "
                          "(the gripper is closed through both), chicken at the grasp close, bin at the place open")
+    ap.add_argument("--place-z", type=float, default=None,
+                    help="drawer recovery: height (m) of the bin target for pre-place without a release "
+                         "(median 'place' target_base_m z of the full drawer data)")
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args()
     sys.path.insert(0, str(args.atomic_policy_root.resolve()))
@@ -87,6 +94,27 @@ def main() -> None:
         cache = root / "wrist_calibration_tracks.json"
         tracks = json.loads(cache.read_text()) if cache.exists() else {}
     episodes = sorted(p.parent for p in root.glob("*/episode_*/steps_molmo.jsonl"))
+    load = lambda ep: [json.loads(l) for l in (ep / "steps_molmo.jsonl").read_text().splitlines() if l.strip()]
+    recovery = {ep: json.loads((ep / "meta.json").read_text()).get("recovery") for ep in episodes}
+    rec_kw = {}
+    generic_rec = [r for r in recovery.values() if r and r.get("layout", "four_phase") == "four_phase"]
+    if any(r.get("phase") in (0, 2) for r in generic_rec):  # anchors for recovery phases without a contact
+        obj_z, place_z = [], []
+        for ep in episodes:
+            rec = recovery[ep]
+            if rec and rec["phase"] != 3:
+                continue
+            rows = load(ep)
+            T = panda_fk_batch(np.array([r["state"]["positions"][:7] for r in rows]))
+            cmd = np.array([r["action"]["positions"][7] for r in rows]) > 0.5
+            ph = [r["phase_index"] for r in rows]
+            kw = {"task": "recovery", "phase": 3} if rec else {}
+            wins = wrist_labels(cam, T, cmd, ph, args.place_drop, **kw)["windows"]
+            obj_z += [w.point_base[2] for w in wins if w.role == "object"]
+            place_z += [w.point_base[2] for w in wins if w.role == "place"]
+        rec_kw = {"object_z": float(np.median(obj_z)), "place_z": float(np.median(place_z))}
+        print(f"recovery anchors: object z {rec_kw['object_z']:.4f} m ({len(obj_z)} closes), "
+              f"place z {rec_kw['place_z']:.4f} m ({len(place_z)} releases)")
     totals = {"episodes": 0, "frames": 0, "visible": 0, "windows": 0, "review": 0, "checked": 0}
     qa_errors = []
     for n_ep, ep in enumerate(episodes):
@@ -96,7 +124,14 @@ def main() -> None:
         cmd = np.array([r["action"]["positions"][7] for r in rows]) > 0.5
         phases = [r["phase_index"] for r in rows]
         T = panda_fk_batch(q)
-        lab = wrist_labels(cam, T, cmd, phases, args.place_drop, task=args.task)
+        rec = recovery[ep]
+        if rec and rec.get("layout") == "chicken_six_phase":
+            lab = wrist_labels(cam, T, cmd, phases, args.place_drop, task="drawer_chicken", place_z=args.place_z)
+        elif rec:
+            lab = wrist_labels(cam, T, cmd, phases, args.place_drop, task="recovery", phase=rec["phase"],
+                               **rec_kw)
+        else:
+            lab = wrist_labels(cam, T, cmd, phases, args.place_drop, task=args.task)
         win_info = []
         for i, w in enumerate(lab["windows"]):
             info = {"segments": w.segments, "phases": [lab["segments"][k][0] for k in w.segments],
@@ -128,7 +163,7 @@ def main() -> None:
             ann = json.loads(ann_path.read_text())
             ann["wrist"] = {"method": "contact-anchored hindsight projection (atomic_policy.wrist.targets)",
                             "calibration": str(cal_path), "calibration_sha256": sha256(cal_path),
-                            "place_drop_m": args.place_drop, "task": args.task, "point_coordinate_system": "normalized xy on full wrist RGB image",
+                            "place_drop_m": args.place_drop, "task": ("recovery" if rec.get("layout", "four_phase") == "four_phase" else "drawer_chicken recovery") if rec else args.task, "point_coordinate_system": "normalized xy on full wrist RGB image",
                             "steps_sha256": sha256(path), "windows": win_info}
             ann_path.write_text(json.dumps(ann, indent=2) + "\n")
             if n_ep < args.previews:

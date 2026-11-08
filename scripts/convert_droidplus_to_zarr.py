@@ -32,13 +32,15 @@ def phase_layout(path: Path, segments: list[dict]) -> str:
     Drawer six-phase: one 0..5 sequence (open drawer, put cube in, close drawer).
     Chicken six-phase: (0,1) once or more (one drawer after the other), then 2,3,4,5."""
     labels = [s["phase_index"] for s in segments]
-    # Single-phase recovery episode of a four-phase task (scripts/prep_crossword_bigletter.py writes meta 'recovery')
+    # Recovery episode: one or two phases of a task, starting from a failed state (meta 'recovery', written by
+    # scripts/prep_crossword_bigletter.py / prep_recovery_20261107.py); layout of the full task, default four_phase
     meta_path = path.parent / "meta.json"
     recovery = json.loads(meta_path.read_text()).get("recovery") if meta_path.is_file() else None
     if recovery:
-        if labels != [recovery["phase"]]:
-            raise ValueError(f"{path}: recovery episode of phase {recovery['phase']} has phase segments {labels}")
-        return "four_phase"
+        expected = recovery.get("phases") or [recovery["phase"]]
+        if labels != expected:
+            raise ValueError(f"{path}: recovery episode of phases {expected} has phase segments {labels}")
+        return recovery.get("layout", "four_phase")
     if segments and segments[0]["phase_prompt"].startswith("pre-open"):
         opens = len(labels) - 4
         if opens < 2 or opens % 2 or labels != [0, 1] * (opens // 2) + [2, 3, 4, 5]:
