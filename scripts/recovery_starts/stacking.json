@@ -1,0 +1,170 @@
+{
+  "_doc": "Recovery start frames (raw image numbers) picked in scripts/recovery_cut_ui.py; applied with scripts/trim_recovery_start.py.",
+  "dataset": "data/annotated/spacemouse_stacking_4phase_recovery",
+  "starts": {
+    "stacking_4phase_recovery_teleop_20261107_171745/episode_000": 102,
+    "stacking_4phase_recovery_teleop_20261107_171745/episode_002": 77,
+    "stacking_4phase_recovery_teleop_20261107_171745/episode_004": 85,
+    "stacking_4phase_recovery_teleop_20261107_171745/episode_006": 86,
+    "stacking_4phase_recovery_teleop_20261107_171745/episode_008": 72,
+    "stacking_4phase_recovery_teleop_20261107_171745/episode_010": 59,
+    "stacking_4phase_recovery_teleop_20261107_171745/episode_012": 60,
+    "stacking_4phase_recovery_teleop_20261107_171745/episode_014": 60,
+    "stacking_4phase_recovery_teleop_20261107_171745/episode_016": 62,
+    "stacking_4phase_recovery_teleop_20261107_171745/episode_018": 66,
+    "stacking_4phase_recovery_teleop_20261107_171745/episode_020": 73,
+    "stacking_4phase_recovery_teleop_20261107_171745/episode_022": 0,
+    "stacking_4phase_recovery_teleop_20261107_173129/episode_003": 24,
+    "stacking_4phase_recovery_teleop_20261107_173129/episode_005": 71,
+    "stacking_4phase_recovery_teleop_20261107_173129/episode_007": 38,
+    "stacking_4phase_recovery_teleop_20261107_173129/episode_009": 47,
+    "stacking_4phase_recovery_teleop_20261107_173129/episode_011": 51,
+    "stacking_4phase_recovery_teleop_20261107_173129/episode_013": 23,
+    "stacking_4phase_recovery_teleop_20261107_173129/episode_015": 36,
+    "stacking_4phase_recovery_teleop_20261107_173129/episode_017": 0,
+    "stacking_4phase_recovery_teleop_20261107_173129/episode_019": 93,
+    "stacking_4phase_recovery_teleop_20261107_173129/episode_021": 93,
+    "stacking_4phase_recovery_teleop_20261107_173129/episode_023": 55,
+    "stacking_4phase_recovery_teleop_20261107_173129/episode_025": 53,
+    "stacking_4phase_recovery_teleop_20261107_173129/episode_027": 72,
+    "stacking_4phase_recovery_teleop_20261107_173129/episode_029": 38,
+    "stacking_4phase_recovery_teleop_20261107_173129/episode_031": 48
+  },
+  "_proposals": {
+    "stacking_4phase_recovery_teleop_20261107_171745/episode_000": {
+      "frame": 102,
+      "why": "failed close at 82 + 20 (reopen 137)",
+      "flag": false
+    },
+    "stacking_4phase_recovery_teleop_20261107_171745/episode_002": {
+      "frame": 77,
+      "why": "failed close at 57 + 20 (reopen 83)",
+      "flag": false
+    },
+    "stacking_4phase_recovery_teleop_20261107_171745/episode_004": {
+      "frame": 85,
+      "why": "failed close at 65 + 20 (reopen 110)",
+      "flag": false
+    },
+    "stacking_4phase_recovery_teleop_20261107_171745/episode_006": {
+      "frame": 86,
+      "why": "failed close at 66 + 20 (reopen 90)",
+      "flag": false
+    },
+    "stacking_4phase_recovery_teleop_20261107_171745/episode_008": {
+      "frame": 72,
+      "why": "failed close at 52 + 20 (reopen 76)",
+      "flag": false
+    },
+    "stacking_4phase_recovery_teleop_20261107_171745/episode_010": {
+      "frame": 59,
+      "why": "failed close at 39 + 20 (reopen 69)",
+      "flag": false
+    },
+    "stacking_4phase_recovery_teleop_20261107_171745/episode_012": {
+      "frame": 60,
+      "why": "failed close at 40 + 20 (reopen 64)",
+      "flag": false
+    },
+    "stacking_4phase_recovery_teleop_20261107_171745/episode_014": {
+      "frame": 60,
+      "why": "failed close at 40 + 20 (reopen 67)",
+      "flag": false
+    },
+    "stacking_4phase_recovery_teleop_20261107_171745/episode_016": {
+      "frame": 62,
+      "why": "failed close at 43 + 20 (reopen 62)",
+      "flag": false
+    },
+    "stacking_4phase_recovery_teleop_20261107_171745/episode_018": {
+      "frame": 66,
+      "why": "failed close at 46 + 20 (reopen 67)",
+      "flag": false
+    },
+    "stacking_4phase_recovery_teleop_20261107_171745/episode_020": {
+      "frame": 73,
+      "why": "failed close at 55 + 20 (reopen 73)",
+      "flag": false
+    },
+    "stacking_4phase_recovery_teleop_20261107_171745/episode_022": {
+      "frame": 0,
+      "why": "no gripper failure found: check by eye",
+      "flag": true
+    },
+    "stacking_4phase_recovery_teleop_20261107_173129/episode_003": {
+      "frame": 24,
+      "why": "held block first down at release height (0.341 m + 2 cm), release at 156",
+      "flag": false
+    },
+    "stacking_4phase_recovery_teleop_20261107_173129/episode_005": {
+      "frame": 31,
+      "why": "held block first down at release height (0.318 m + 2 cm), release at 123",
+      "flag": false
+    },
+    "stacking_4phase_recovery_teleop_20261107_173129/episode_007": {
+      "frame": 38,
+      "why": "held block first down at release height (0.321 m + 2 cm), release at 122",
+      "flag": false
+    },
+    "stacking_4phase_recovery_teleop_20261107_173129/episode_009": {
+      "frame": 47,
+      "why": "held block first down at release height (0.326 m + 2 cm), release at 138",
+      "flag": false
+    },
+    "stacking_4phase_recovery_teleop_20261107_173129/episode_011": {
+      "frame": 33,
+      "why": "held block first down at release height (0.311 m + 2 cm), release at 112",
+      "flag": false
+    },
+    "stacking_4phase_recovery_teleop_20261107_173129/episode_013": {
+      "frame": 23,
+      "why": "held block first down at release height (0.307 m + 2 cm), release at 111",
+      "flag": false
+    },
+    "stacking_4phase_recovery_teleop_20261107_173129/episode_015": {
+      "frame": 36,
+      "why": "held block first down at release height (0.327 m + 2 cm), release at 128",
+      "flag": false
+    },
+    "stacking_4phase_recovery_teleop_20261107_173129/episode_017": {
+      "frame": 58,
+      "why": "held block first down at release height (0.309 m + 2 cm), release at 88",
+      "flag": false
+    },
+    "stacking_4phase_recovery_teleop_20261107_173129/episode_019": {
+      "frame": 81,
+      "why": "held block first down at release height (0.324 m + 2 cm), release at 160",
+      "flag": false
+    },
+    "stacking_4phase_recovery_teleop_20261107_173129/episode_021": {
+      "frame": 93,
+      "why": "held block first down at release height (0.310 m + 2 cm), release at 185",
+      "flag": false
+    },
+    "stacking_4phase_recovery_teleop_20261107_173129/episode_023": {
+      "frame": 22,
+      "why": "held block first down at release height (0.354 m + 2 cm), release at 90",
+      "flag": false
+    },
+    "stacking_4phase_recovery_teleop_20261107_173129/episode_025": {
+      "frame": 53,
+      "why": "held block first down at release height (0.330 m + 2 cm), release at 91",
+      "flag": false
+    },
+    "stacking_4phase_recovery_teleop_20261107_173129/episode_027": {
+      "frame": 26,
+      "why": "held block first down at release height (0.338 m + 2 cm), release at 124",
+      "flag": false
+    },
+    "stacking_4phase_recovery_teleop_20261107_173129/episode_029": {
+      "frame": 38,
+      "why": "held block first down at release height (0.327 m + 2 cm), release at 80",
+      "flag": false
+    },
+    "stacking_4phase_recovery_teleop_20261107_173129/episode_031": {
+      "frame": 48,
+      "why": "held block first down at release height (0.324 m + 2 cm), release at 122",
+      "flag": false
+    }
+  }
+}
