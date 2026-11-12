@@ -27,6 +27,9 @@ FILES = ("steps.jsonl", "steps_molmo.jsonl", "ee_trajectory.json", "meta.json", 
 MIN_KEEP = 30
 
 
+DRAWER_PLACE_Z = 0.08   # median bin target height of the full drawer data
+
+
 def frame_no(row: dict) -> int:
     return int(re.search(r"(\d+)\.\w+$", row["images"]["wrist"])[1])
 
@@ -79,13 +82,20 @@ def relabel_wrist(molmo: list[dict], ann: dict, rec: dict):
     sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "atomic_policy"))
     from atomic_policy.wrist.geometry import WristCamera, panda_fk_batch
     from atomic_policy.wrist.targets import wrist_labels
-    if rec.get("phase") not in (1, 3) or rec.get("layout", "four_phase") != "four_phase":
+    drawer = rec.get("layout") == "chicken_six_phase"
+    if drawer and (rec.get("phases") or [None])[0] != 3:
+        raise ValueError("restoring frames is only supported for drawer grasp + pre-place recoveries (contact-anchored)")
+    if not drawer and (rec.get("phase") not in (1, 3) or rec.get("layout", "four_phase") != "four_phase"):
         raise ValueError("restoring frames is only supported for grasp / place recoveries (contact-anchored)")
     w = ann["wrist"]
     cam = WristCamera.load(Path(w["calibration"]))
     T = panda_fk_batch(np.array([r["state"]["positions"][:7] for r in molmo]))
     cmd = np.array([r["action"]["positions"][7] for r in molmo]) > 0.5
-    lab = wrist_labels(cam, T, cmd, [r["phase_index"] for r in molmo], w["place_drop_m"], task="recovery", phase=rec["phase"])
+    phases = [r["phase_index"] for r in molmo]
+    if drawer:   # as annotate_wrist_points.py --task drawer_chicken --place-z 0.08 (docs/recovery-stacking-drawer-20261107.md)
+        lab = wrist_labels(cam, T, cmd, phases, w["place_drop_m"], task="drawer_chicken", place_z=DRAWER_PLACE_Z)
+    else:
+        lab = wrist_labels(cam, T, cmd, phases, w["place_drop_m"], task="recovery", phase=rec["phase"])
     for f, r in enumerate(molmo):
         vis = bool(lab["visible"][f])
         r["wrist_point_pixel"] = [round(float(v), 6) for v in lab["uv"][f]] if vis else [-1.0, -1.0]

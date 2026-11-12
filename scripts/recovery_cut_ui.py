@@ -45,6 +45,49 @@ def flips(cmd):
     return [(i, c) for i, c in enumerate(cmd) if i and c != cmd[i - 1]]
 
 
+def drawer_proposal(phase, cmd, closes, opens, pos, nums):
+    """Drawer chicken-search recoveries (layout chicken_six_phase; phases 0 pre-open, 1 open-and-home, 3+4 grasp +
+    pre-place), same idea as the crossword / stacking picks: start in the failed state, not on the way into it."""
+    n = len(cmd)
+    if phase == 3 and len(closes) >= 2:
+        c, regrasp = closes[-2], closes[-1]
+        reopen = next((i for i in opens if c < i < regrasp), None)
+        if reopen is None:
+            return 0, "grasp: no reopen between the closes: check by eye", True
+        lift = (max(p[2] for p in pos[c:reopen + 1]) - pos[c][2]) if pos else 0.0
+        if lift > 0.03:   # the chicken came up in the hand and was dropped: start after the drop (stacking rule)
+            k = max(reopen, regrasp - REGRASP_LEAD)
+            return k, (f"staged drop: closed {nums[c]}, lifted {lift * 100:.0f} cm, dropped {nums[reopen]}; "
+                       f"{REGRASP_LEAD} before the re-grasp {nums[regrasp]}"), regrasp - reopen > 150
+        k = min(c + SETTLE, reopen)
+        long = regrasp - reopen > 150
+        return k, (f"missed grasp: failed close {nums[c]} + {SETTLE} (reopen {nums[reopen]}, re-grasp {nums[regrasp]})"
+                   + ("; long search before the re-grasp: check by eye" if long else "")), long
+    if phase == 0 and len(closes) >= 2:
+        c = closes[-2]
+        reopen = next((i for i in opens if i > c), n - 1)
+        k = min(c + SETTLE, reopen - 5)   # short closes (12-17 frames): keep a few closed frames before the reopen
+        return k, f"staged close away from the handle at {nums[c]}, settled (+{k - c}, reopen {nums[reopen]})", False
+    if phase in (0, 1) and pos:
+        # the recording starts at the offset / mis-hooked pose (the failed state): keep it, unless the arm drives into
+        # a second bad pose and backs out of it (a local minimum of the distance to the end pose, then >= 3 cm away)
+        d = [sum((a - b) ** 2 for a, b in zip(p, pos[-1])) ** 0.5 for p in pos]
+        best = None
+        for i in range(1, n - 1):
+            later = max(d[i:], default=0)
+            back = max(d[i:next((j for j in range(i, n) if d[j] < d[i] - 0.02), n)], default=0)
+            if back - d[i] >= 0.03 and d[i] == min(d[:i + 1]) and (best is None or d[i] < d[best]):
+                best = i
+        if best is not None and phase == 0:
+            k = next(j for j in range(best + 1) if d[j] <= d[best] + 0.01)
+            return k, (f"reaches a bad pose {d[best] * 100:.0f} cm from the end pose at {nums[best]}, backs out: "
+                       f"start where it arrives ({nums[k]})"), True
+        what = "offset start pose" if phase == 0 else "mis-hooked start"
+        return 0, f"{what} is the failed state from frame 0: keep all" + (
+            " (re-hooks mid-episode: check)" if best is not None else ""), best is not None
+    return 0, "no failure found: check by eye", True
+
+
 def load_episode(ep: Path, root: Path) -> dict:
     meta = json.loads((ep / "meta.json").read_text())
     rec = meta["recovery"]
@@ -68,7 +111,10 @@ def load_episode(ep: Path, root: Path) -> dict:
     closes = [i for i, c in f if c == 1]
     opens = [i for i, c in f if c == 0]
     prop, why, flag = 0, "no gripper failure found: check by eye", True
-    if phase == 1 and len(closes) >= 2:
+    if rec.get("layout") == "chicken_six_phase":
+        phase = rec["phases"][0]
+        prop, why, flag = drawer_proposal(phase, cmd, closes, opens, pos, nums)
+    elif phase == 1 and len(closes) >= 2:
         c = closes[-2]
         reopen = next((i for i in opens if i > c), len(cmd) - 1)
         prop, why, flag = min(c + SETTLE, reopen), f"failed close at {nums[c]} + {SETTLE} (reopen {nums[reopen]})", False
@@ -84,6 +130,8 @@ def load_episode(ep: Path, root: Path) -> dict:
             prop, why, flag = low[0], f"held block first down at release height ({z[rel]:.3f} m + 2 cm), release at {nums[rel]}", False
     rel = str(ep.relative_to(root))
     prompt = (rec.get("prompts") or {}).get(str(phase)) or rec.get("phase_name") or ""
+    if not prompt:
+        prompt = (read_jsonl(ep / "steps.jsonl")[0].get("phase_prompt") or "") + ("  (+ pre-place)" if len(rec.get("phases") or []) > 1 else "")
     return {"ep": rel, "recording": rec.get("recording"), "phase": phase, "prompt": prompt,
             "held": bool(rec.get("start_held")), "nums": nums, "cmd": cmd,
             "z": [round(v, 4) for v in z], "prep_cut": nums[0] + (rec_prep.get("trim_start") or 0) if raw_p.name.endswith(".orig") else nums[0],

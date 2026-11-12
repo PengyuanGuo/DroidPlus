@@ -1,0 +1,319 @@
+{
+  "_doc": "Recovery start frames (raw image numbers) picked in scripts/recovery_cut_ui.py; applied with scripts/trim_recovery_start.py.",
+  "dataset": "data/annotated/spacemouse_drawer_chicken_6phase_recovery",
+  "starts": {
+    "drawer_chicken_search_6phase_recovery_teleop_20261107_161052/episode_000": 0,
+    "drawer_chicken_search_6phase_recovery_teleop_20261107_161052/episode_001": 0,
+    "drawer_chicken_search_6phase_recovery_teleop_20261107_161052/episode_002": 129,
+    "drawer_chicken_search_6phase_recovery_teleop_20261107_161052/episode_003": 29,
+    "drawer_chicken_search_6phase_recovery_teleop_20261107_161052/episode_004": 26,
+    "drawer_chicken_search_6phase_recovery_teleop_20261107_161052/episode_005": 40,
+    "drawer_chicken_search_6phase_recovery_teleop_20261107_161052/episode_006": 33,
+    "drawer_chicken_search_6phase_recovery_teleop_20261107_161052/episode_007": 25,
+    "drawer_chicken_search_6phase_recovery_teleop_20261107_161052/episode_008": 0,
+    "drawer_chicken_search_6phase_recovery_teleop_20261107_161052/episode_010": 83,
+    "drawer_chicken_search_6phase_recovery_teleop_20261107_161052/episode_012": 144,
+    "drawer_chicken_search_6phase_recovery_teleop_20261107_161052/episode_014": 0,
+    "drawer_chicken_search_6phase_recovery_teleop_20261107_161052/episode_017": 85,
+    "drawer_chicken_search_6phase_recovery_teleop_20261107_161052/episode_019": 89,
+    "drawer_chicken_search_6phase_recovery_teleop_20261107_161052/episode_021": 146,
+    "drawer_chicken_search_6phase_recovery_teleop_20261107_161052/episode_023": 92,
+    "drawer_chicken_search_6phase_recovery_teleop_20261107_161052/episode_025": 90,
+    "drawer_chicken_search_6phase_recovery_teleop_20261107_161052/episode_027": 0,
+    "drawer_chicken_search_6phase_recovery_teleop_20261107_161052/episode_029": 0,
+    "drawer_chicken_search_6phase_recovery_teleop_20261107_161052/episode_031": 108,
+    "drawer_chicken_search_6phase_recovery_teleop_20261107_163143/episode_001": 0,
+    "drawer_chicken_search_6phase_recovery_teleop_20261107_163143/episode_002": 69,
+    "drawer_chicken_search_6phase_recovery_teleop_20261107_163143/episode_003": 56,
+    "drawer_chicken_search_6phase_recovery_teleop_20261107_163143/episode_004": 59,
+    "drawer_chicken_search_6phase_recovery_teleop_20261107_163143/episode_005": 46,
+    "drawer_chicken_search_6phase_recovery_teleop_20261107_163143/episode_006": 34,
+    "drawer_chicken_search_6phase_recovery_teleop_20261107_163143/episode_007": 61,
+    "drawer_chicken_search_6phase_recovery_teleop_20261107_163143/episode_008": 0,
+    "drawer_chicken_search_6phase_recovery_teleop_20261107_163143/episode_009": 0,
+    "drawer_chicken_search_6phase_recovery_teleop_20261107_163143/episode_010": 0,
+    "drawer_chicken_search_6phase_recovery_teleop_20261107_163143/episode_011": 42,
+    "drawer_chicken_search_6phase_recovery_teleop_20261107_163143/episode_012": 24,
+    "drawer_chicken_search_6phase_recovery_teleop_20261107_163143/episode_013": 27,
+    "drawer_chicken_search_6phase_recovery_teleop_20261107_163143/episode_014": 24,
+    "drawer_chicken_search_6phase_recovery_teleop_20261107_163143/episode_015": 49,
+    "drawer_chicken_search_6phase_recovery_teleop_20261107_163143/episode_016": 34,
+    "drawer_chicken_search_6phase_recovery_teleop_20261107_163923/episode_001": 42,
+    "drawer_chicken_search_6phase_recovery_teleop_20261107_163923/episode_002": 31,
+    "drawer_chicken_search_6phase_recovery_teleop_20261107_163923/episode_003": 46,
+    "drawer_chicken_search_6phase_recovery_teleop_20261107_163923/episode_004": 47,
+    "drawer_chicken_search_6phase_recovery_teleop_20261107_163923/episode_005": 31,
+    "drawer_chicken_search_6phase_recovery_teleop_20261107_163923/episode_006": 46,
+    "drawer_chicken_search_6phase_recovery_teleop_20261107_164827/episode_000": 148,
+    "drawer_chicken_search_6phase_recovery_teleop_20261107_164827/episode_002": 109,
+    "drawer_chicken_search_6phase_recovery_teleop_20261107_164827/episode_005": 127,
+    "drawer_chicken_search_6phase_recovery_teleop_20261107_164827/episode_007": 171,
+    "drawer_chicken_search_6phase_recovery_teleop_20261107_164827/episode_009": 161,
+    "drawer_chicken_search_6phase_recovery_teleop_20261107_164827/episode_011": 133,
+    "drawer_chicken_search_6phase_recovery_teleop_20261107_164827/episode_013": 137,
+    "drawer_chicken_search_6phase_recovery_teleop_20261107_164827/episode_015": 207,
+    "drawer_chicken_search_6phase_recovery_teleop_20261107_164827/episode_018": 104
+  },
+  "_proposals": {
+    "drawer_chicken_search_6phase_recovery_teleop_20261107_161052/episode_000": {
+      "frame": 0,
+      "why": "offset start pose is the failed state from frame 0: keep all",
+      "flag": false
+    },
+    "drawer_chicken_search_6phase_recovery_teleop_20261107_161052/episode_001": {
+      "frame": 0,
+      "why": "offset start pose is the failed state from frame 0: keep all",
+      "flag": false
+    },
+    "drawer_chicken_search_6phase_recovery_teleop_20261107_161052/episode_002": {
+      "frame": 129,
+      "why": "staged close away from the handle at 118, settled (+11, reopen 134)",
+      "flag": false
+    },
+    "drawer_chicken_search_6phase_recovery_teleop_20261107_161052/episode_003": {
+      "frame": 29,
+      "why": "staged close away from the handle at 21, settled (+8, reopen 34)",
+      "flag": false
+    },
+    "drawer_chicken_search_6phase_recovery_teleop_20261107_161052/episode_004": {
+      "frame": 26,
+      "why": "staged close away from the handle at 17, settled (+9, reopen 31)",
+      "flag": false
+    },
+    "drawer_chicken_search_6phase_recovery_teleop_20261107_161052/episode_005": {
+      "frame": 26,
+      "why": "staged close away from the handle at 19, settled (+7, reopen 31)",
+      "flag": false
+    },
+    "drawer_chicken_search_6phase_recovery_teleop_20261107_161052/episode_006": {
+      "frame": 33,
+      "why": "staged close away from the handle at 21, settled (+12, reopen 38)",
+      "flag": false
+    },
+    "drawer_chicken_search_6phase_recovery_teleop_20261107_161052/episode_007": {
+      "frame": 25,
+      "why": "staged close away from the handle at 17, settled (+8, reopen 30)",
+      "flag": false
+    },
+    "drawer_chicken_search_6phase_recovery_teleop_20261107_161052/episode_008": {
+      "frame": 0,
+      "why": "offset start pose is the failed state from frame 0: keep all",
+      "flag": false
+    },
+    "drawer_chicken_search_6phase_recovery_teleop_20261107_161052/episode_010": {
+      "frame": 0,
+      "why": "offset start pose is the failed state from frame 0: keep all",
+      "flag": false
+    },
+    "drawer_chicken_search_6phase_recovery_teleop_20261107_161052/episode_012": {
+      "frame": 100,
+      "why": "reaches a bad pose 13 cm from the end pose at 114, backs out: start where it arrives (100)",
+      "flag": true
+    },
+    "drawer_chicken_search_6phase_recovery_teleop_20261107_161052/episode_014": {
+      "frame": 0,
+      "why": "offset start pose is the failed state from frame 0: keep all",
+      "flag": false
+    },
+    "drawer_chicken_search_6phase_recovery_teleop_20261107_161052/episode_017": {
+      "frame": 0,
+      "why": "offset start pose is the failed state from frame 0: keep all",
+      "flag": false
+    },
+    "drawer_chicken_search_6phase_recovery_teleop_20261107_161052/episode_019": {
+      "frame": 0,
+      "why": "offset start pose is the failed state from frame 0: keep all",
+      "flag": false
+    },
+    "drawer_chicken_search_6phase_recovery_teleop_20261107_161052/episode_021": {
+      "frame": 0,
+      "why": "offset start pose is the failed state from frame 0: keep all",
+      "flag": false
+    },
+    "drawer_chicken_search_6phase_recovery_teleop_20261107_161052/episode_023": {
+      "frame": 0,
+      "why": "offset start pose is the failed state from frame 0: keep all",
+      "flag": false
+    },
+    "drawer_chicken_search_6phase_recovery_teleop_20261107_161052/episode_025": {
+      "frame": 0,
+      "why": "offset start pose is the failed state from frame 0: keep all",
+      "flag": false
+    },
+    "drawer_chicken_search_6phase_recovery_teleop_20261107_161052/episode_027": {
+      "frame": 0,
+      "why": "offset start pose is the failed state from frame 0: keep all",
+      "flag": false
+    },
+    "drawer_chicken_search_6phase_recovery_teleop_20261107_161052/episode_029": {
+      "frame": 0,
+      "why": "offset start pose is the failed state from frame 0: keep all",
+      "flag": false
+    },
+    "drawer_chicken_search_6phase_recovery_teleop_20261107_161052/episode_031": {
+      "frame": 0,
+      "why": "offset start pose is the failed state from frame 0: keep all",
+      "flag": false
+    },
+    "drawer_chicken_search_6phase_recovery_teleop_20261107_163143/episode_001": {
+      "frame": 0,
+      "why": "mis-hooked start is the failed state from frame 0: keep all",
+      "flag": false
+    },
+    "drawer_chicken_search_6phase_recovery_teleop_20261107_163143/episode_002": {
+      "frame": 0,
+      "why": "mis-hooked start is the failed state from frame 0: keep all (re-hooks mid-episode: check)",
+      "flag": true
+    },
+    "drawer_chicken_search_6phase_recovery_teleop_20261107_163143/episode_003": {
+      "frame": 0,
+      "why": "mis-hooked start is the failed state from frame 0: keep all",
+      "flag": false
+    },
+    "drawer_chicken_search_6phase_recovery_teleop_20261107_163143/episode_004": {
+      "frame": 0,
+      "why": "mis-hooked start is the failed state from frame 0: keep all",
+      "flag": false
+    },
+    "drawer_chicken_search_6phase_recovery_teleop_20261107_163143/episode_005": {
+      "frame": 0,
+      "why": "mis-hooked start is the failed state from frame 0: keep all",
+      "flag": false
+    },
+    "drawer_chicken_search_6phase_recovery_teleop_20261107_163143/episode_006": {
+      "frame": 0,
+      "why": "mis-hooked start is the failed state from frame 0: keep all",
+      "flag": false
+    },
+    "drawer_chicken_search_6phase_recovery_teleop_20261107_163143/episode_007": {
+      "frame": 0,
+      "why": "mis-hooked start is the failed state from frame 0: keep all",
+      "flag": false
+    },
+    "drawer_chicken_search_6phase_recovery_teleop_20261107_163143/episode_008": {
+      "frame": 0,
+      "why": "mis-hooked start is the failed state from frame 0: keep all",
+      "flag": false
+    },
+    "drawer_chicken_search_6phase_recovery_teleop_20261107_163143/episode_009": {
+      "frame": 0,
+      "why": "mis-hooked start is the failed state from frame 0: keep all",
+      "flag": false
+    },
+    "drawer_chicken_search_6phase_recovery_teleop_20261107_163143/episode_010": {
+      "frame": 0,
+      "why": "mis-hooked start is the failed state from frame 0: keep all",
+      "flag": false
+    },
+    "drawer_chicken_search_6phase_recovery_teleop_20261107_163143/episode_011": {
+      "frame": 0,
+      "why": "mis-hooked start is the failed state from frame 0: keep all",
+      "flag": false
+    },
+    "drawer_chicken_search_6phase_recovery_teleop_20261107_163143/episode_012": {
+      "frame": 0,
+      "why": "mis-hooked start is the failed state from frame 0: keep all",
+      "flag": false
+    },
+    "drawer_chicken_search_6phase_recovery_teleop_20261107_163143/episode_013": {
+      "frame": 0,
+      "why": "mis-hooked start is the failed state from frame 0: keep all",
+      "flag": false
+    },
+    "drawer_chicken_search_6phase_recovery_teleop_20261107_163143/episode_014": {
+      "frame": 0,
+      "why": "mis-hooked start is the failed state from frame 0: keep all",
+      "flag": false
+    },
+    "drawer_chicken_search_6phase_recovery_teleop_20261107_163143/episode_015": {
+      "frame": 0,
+      "why": "mis-hooked start is the failed state from frame 0: keep all (re-hooks mid-episode: check)",
+      "flag": true
+    },
+    "drawer_chicken_search_6phase_recovery_teleop_20261107_163143/episode_016": {
+      "frame": 0,
+      "why": "mis-hooked start is the failed state from frame 0: keep all (re-hooks mid-episode: check)",
+      "flag": true
+    },
+    "drawer_chicken_search_6phase_recovery_teleop_20261107_163923/episode_001": {
+      "frame": 0,
+      "why": "mis-hooked start is the failed state from frame 0: keep all (re-hooks mid-episode: check)",
+      "flag": true
+    },
+    "drawer_chicken_search_6phase_recovery_teleop_20261107_163923/episode_002": {
+      "frame": 0,
+      "why": "mis-hooked start is the failed state from frame 0: keep all (re-hooks mid-episode: check)",
+      "flag": true
+    },
+    "drawer_chicken_search_6phase_recovery_teleop_20261107_163923/episode_003": {
+      "frame": 0,
+      "why": "mis-hooked start is the failed state from frame 0: keep all",
+      "flag": false
+    },
+    "drawer_chicken_search_6phase_recovery_teleop_20261107_163923/episode_004": {
+      "frame": 0,
+      "why": "mis-hooked start is the failed state from frame 0: keep all (re-hooks mid-episode: check)",
+      "flag": true
+    },
+    "drawer_chicken_search_6phase_recovery_teleop_20261107_163923/episode_005": {
+      "frame": 0,
+      "why": "mis-hooked start is the failed state from frame 0: keep all",
+      "flag": false
+    },
+    "drawer_chicken_search_6phase_recovery_teleop_20261107_163923/episode_006": {
+      "frame": 0,
+      "why": "mis-hooked start is the failed state from frame 0: keep all (re-hooks mid-episode: check)",
+      "flag": true
+    },
+    "drawer_chicken_search_6phase_recovery_teleop_20261107_164827/episode_000": {
+      "frame": 206,
+      "why": "staged drop: closed 153, lifted 3 cm, dropped 185; 15 before the re-grasp 221",
+      "flag": false
+    },
+    "drawer_chicken_search_6phase_recovery_teleop_20261107_164827/episode_002": {
+      "frame": 128,
+      "why": "missed grasp: failed close 108 + 20 (reopen 135, re-grasp 178)",
+      "flag": false
+    },
+    "drawer_chicken_search_6phase_recovery_teleop_20261107_164827/episode_005": {
+      "frame": 127,
+      "why": "missed grasp: failed close 107 + 20 (reopen 133, re-grasp 166)",
+      "flag": false
+    },
+    "drawer_chicken_search_6phase_recovery_teleop_20261107_164827/episode_007": {
+      "frame": 237,
+      "why": "staged drop: closed 117, lifted 6 cm, dropped 178; 15 before the re-grasp 252",
+      "flag": false
+    },
+    "drawer_chicken_search_6phase_recovery_teleop_20261107_164827/episode_009": {
+      "frame": 161,
+      "why": "missed grasp: failed close 141 + 20 (reopen 165, re-grasp 202)",
+      "flag": false
+    },
+    "drawer_chicken_search_6phase_recovery_teleop_20261107_164827/episode_011": {
+      "frame": 133,
+      "why": "missed grasp: failed close 113 + 20 (reopen 168, re-grasp 221)",
+      "flag": false
+    },
+    "drawer_chicken_search_6phase_recovery_teleop_20261107_164827/episode_013": {
+      "frame": 137,
+      "why": "missed grasp: failed close 117 + 20 (reopen 141, re-grasp 193)",
+      "flag": false
+    },
+    "drawer_chicken_search_6phase_recovery_teleop_20261107_164827/episode_015": {
+      "frame": 329,
+      "why": "staged drop: closed 159, lifted 11 cm, dropped 297; 15 before the re-grasp 344",
+      "flag": false
+    },
+    "drawer_chicken_search_6phase_recovery_teleop_20261107_164827/episode_018": {
+      "frame": 104,
+      "why": "missed grasp: failed close 84 + 20 (reopen 124, re-grasp 155)",
+      "flag": false
+    },
+    "drawer_chicken_search_6phase_recovery_teleop_20261107_164827/episode_020": {
+      "frame": 75,
+      "why": "missed grasp: failed close 55 + 20 (reopen 95, re-grasp 382); long search before the re-grasp: check by eye",
+      "flag": true
+    }
+  }
+}
